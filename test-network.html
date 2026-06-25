@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>EbizTray — Network Printers</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 760px; margin: 40px auto; padding: 0 20px; color: #333; }
+    h2 { color: #1a1a1a; margin-bottom: 4px; }
+    .nav { display: flex; gap: 8px; margin: 12px 0 4px; }
+    .nav a { font-size: 13px; text-decoration: none; padding: 6px 12px; border: 1px solid #ccc; border-radius: 6px; color: #0066cc; }
+    .nav a.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+    .status { padding: 8px 12px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .status.pending { background: #fff3cd; color: #856404; }
+    label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; }
+    input, select, textarea { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    button { margin-top: 16px; padding: 10px 20px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #0052a3; }
+    .btn-secondary { background: #6c757d; }
+    .btn-secondary:hover { background: #5a6268; }
+    pre { background: #f8f9fa; padding: 12px; white-space: pre-wrap; border-radius: 4px; border: 1px solid #e9ecef; font-size: 13px; max-height: 300px; overflow-y: auto; }
+    .section { margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee; }
+    .row { display: flex; gap: 8px; align-items: flex-end; }
+    .row > div { flex: 1; }
+    small.hint { color: #888; font-weight: 400; }
+
+    .net-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
+    .net-card.empty { color: #888; font-size: 13px; text-align: center; }
+    .net-head { display: flex; align-items: center; gap: 8px; }
+    .net-head input[type=checkbox] { width: auto; margin: 0; }
+    .net-head .name { font-weight: 600; font-size: 14px; }
+    .net-head .addr { color: #888; font-weight: 400; font-size: 12px; }
+    .badge { font-size: 11px; border-radius: 10px; padding: 2px 9px; font-weight: 600; margin-left: auto; }
+    .badge.document { background: #dbeafe; color: #1d4ed8; }
+    .badge.receipt { background: #ede9fe; color: #6d28d9; }
+    .net-opts { display: flex; gap: 8px; margin-top: 8px; }
+    .net-opts > div { flex: 1; }
+    .net-opts label { margin: 0; font-size: 11px; color: #888; font-weight: 400; }
+    .net-opts select { margin-top: 2px; padding: 5px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>🌐 EbizTray — Network Printers</h2>
+  <div class="nav">
+    <a href="/test-local.html">Local Printers</a>
+    <a href="/test-network.html" class="active">Network Printers</a>
+    <a href="/printers.html">View All</a>
+  </div>
+  <p style="font-size:14px;color:#666;">Print to printers <strong>by IP address</strong> (no Windows install needed). Set each printer's <strong>Kind</strong>: <em>Document</em> for laser/inkjet, <em>Receipt</em> for thermal/ESC-POS.</p>
+
+  <div id="wsStatus" class="status disconnected">⚪ Not connected</div>
+
+  <label>Agent URL</label>
+  <input id="agentUrl" value="http://localhost:7654" />
+
+  <div style="display:flex; gap:8px; margin-top:12px;">
+    <button onclick="connectWs()">Connect (WebSocket)</button>
+    <button onclick="checkHealth()" class="btn-secondary">Check Health (HTTP)</button>
+  </div>
+
+  <div class="section">
+    <h3>Discover</h3>
+    <button onclick="discoverNetworkPrinters()">Discover Network Printers</button>
+    <small class="hint">Scans the local network (mDNS + ports 9100/631/515). May take a few seconds.</small>
+
+    <label style="margin-top:16px;">Add a network printer manually</label>
+    <div class="row">
+      <div>
+        <small class="hint">IP address</small>
+        <input id="manualIp" placeholder="192.168.1.50" />
+      </div>
+      <div>
+        <small class="hint">Port</small>
+        <input id="manualPort" type="number" value="9100" />
+      </div>
+      <div>
+        <small class="hint">Kind</small>
+        <select id="manualType">
+          <option value="document">Document</option>
+          <option value="receipt">Receipt</option>
+        </select>
+      </div>
+      <button onclick="addManualPrinter()" style="margin-top:0; flex:0 0 auto;">Add</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Printers</h3>
+    <small class="hint">Tick the ones to print to, then set each printer's Kind and options.</small>
+    <div id="netPrinterList"><div class="net-card empty">No network printers yet. Discover or add one above.</div></div>
+  </div>
+
+  <div class="section">
+    <h3>Print</h3>
+    <p style="font-size:13px;color:#666;">Document printers use the <strong>PDF/HTML</strong>; receipt printers use <strong>Receipt Text</strong> (or the HTML, rasterized) below.</p>
+    <label>PDF URL <small class="hint">(documents only; leave blank to use HTML)</small></label>
+    <input id="pdfUrl" placeholder="https://example.com/invoice.pdf" />
+
+    <label>HTML Content</label>
+    <textarea id="htmlContent" rows="5" placeholder="<h1>Hello World</h1><p>This is a test print from EbizTray.</p>"></textarea>
+
+    <label>Receipt Text <small class="hint">(receipt printers; if blank, the HTML above is rasterized to the receipt width)</small></label>
+    <textarea id="receiptText" rows="3" placeholder="*** ORDER #123 ***&#10;1x Coffee     2.50&#10;Total:        2.50"></textarea>
+
+    <label>Copies</label>
+    <input id="copies" type="number" value="1" min="1" />
+
+    <button onclick="sendPrint()">Print</button>
+    <button onclick="sendPrintWs()" class="btn-secondary">Print (via WebSocket)</button>
+  </div>
+
+  <div class="section">
+    <h3>Log</h3>
+    <pre id="result">Waiting for actions...</pre>
+  </div>
+
+  <script>
+    let ws = null;
+    let msgId = 0;
+
+    // Each entry: { name, ip, port, protocol, source, type, language, widthDots, selected }
+    let networkPrinters = [];
+
+    function log(msg) {
+      const el = document.getElementById('result');
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent;
+    }
+    function setStatus(state, text) {
+      const el = document.getElementById('wsStatus');
+      el.className = 'status ' + state;
+      el.textContent = text;
+    }
+
+    async function checkHealth() {
+      const base = document.getElementById('agentUrl').value;
+      try {
+        const res = await fetch(base + '/health');
+        log('Health: ' + JSON.stringify(await res.json()));
+      } catch (err) { log('ERROR: ' + err.message); }
+    }
+
+    // --- Rendering ---
+    function renderNetworkPrinters() {
+      const list = document.getElementById('netPrinterList');
+      list.innerHTML = '';
+      if (networkPrinters.length === 0) {
+        list.innerHTML = '<div class="net-card empty">No network printers yet. Discover or add one above.</div>';
+        return;
+      }
+      networkPrinters.forEach((p, i) => {
+        const type = p.type || 'document';
+        const card = document.createElement('div');
+        card.className = 'net-card';
+
+        let opts = '';
+        if (type === 'receipt') {
+          opts =
+            `<div><label>Width (dots)</label>` +
+            `<select onchange="updatePrinter(${i},'widthDots',parseInt(this.value,10))">` +
+            opt([['576','80mm (576)'],['512','72mm (512)'],['384','58mm (384)']], String(p.widthDots || 576)) +
+            `</select></div>`;
+        } else {
+          opts =
+            `<div><label>Protocol</label>` +
+            `<select onchange="updatePrinter(${i},'protocol',this.value)">` +
+            opt([['raw','raw (9100)'],['ipp','ipp (631)'],['lpd','lpd (515)']], p.protocol || 'raw') +
+            `</select></div>` +
+            `<div><label>Page language (raw/lpd)</label>` +
+            `<select onchange="updatePrinter(${i},'language',this.value)">` +
+            opt([['postscript','PostScript'],['pcl','PCL5'],['pclxl','PCL6/XL'],['pdf','Send PDF as-is']], p.language || 'postscript') +
+            `</select></div>`;
+        }
+
+        card.innerHTML =
+          `<div class="net-head">` +
+            `<input type="checkbox" class="netPrinterCb" value="${i}" ${p.selected ? 'checked' : ''} onchange="updatePrinter(${i},'selected',this.checked)">` +
+            `<span class="name">${p.name || p.ip}</span>` +
+            `<span class="addr">${p.ip}:${p.port || 9100}${p.source ? ' · ' + p.source : ''}</span>` +
+            `<span class="badge ${type}">${type}</span>` +
+          `</div>` +
+          `<div class="net-opts">` +
+            `<div><label>Kind</label>` +
+            `<select onchange="updatePrinter(${i},'type',this.value)">` +
+            opt([['document','Document (laser/inkjet)'],['receipt','Receipt (thermal/ESC-POS)']], type) +
+            `</select></div>` +
+            opts +
+          `</div>`;
+        list.appendChild(card);
+      });
+    }
+
+    function opt(pairs, selected) {
+      return pairs.map(([v, label]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${label}</option>`).join('');
+    }
+
+    function updatePrinter(i, key, value) {
+      networkPrinters[i][key] = value;
+      // Re-render when the kind changes so the right options show.
+      if (key === 'type') {
+        if (value === 'receipt' && !networkPrinters[i].widthDots) networkPrinters[i].widthDots = 576;
+        renderNetworkPrinters();
+      }
+    }
+
+    async function discoverNetworkPrinters() {
+      const base = document.getElementById('agentUrl').value;
+      log('Discovering network printers... (this can take a few seconds)');
+      try {
+        const res = await fetch(base + '/network-printers', { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (data.error) { log('ERROR discovering: ' + data.error); return; }
+        mergePrinters(data.printers || []);
+        renderNetworkPrinters();
+        log('Discovered: ' + JSON.stringify(data.printers || []));
+      } catch (err) { log('ERROR discovering network printers: ' + err.message); }
+    }
+
+    function mergePrinters(found) {
+      const seen = new Set(networkPrinters.map(p => `${p.ip}:${p.port}`));
+      found.forEach(p => {
+        const key = `${p.ip}:${p.port}`;
+        if (!seen.has(key)) {
+          networkPrinters.push({ ...p, type: p.type || 'document' });
+          seen.add(key);
+        }
+      });
+    }
+
+    function addManualPrinter() {
+      const ip = document.getElementById('manualIp').value.trim();
+      const port = parseInt(document.getElementById('manualPort').value || '9100', 10);
+      const type = document.getElementById('manualType').value;
+      if (!ip) { log('ERROR: enter an IP address'); return; }
+      const key = `${ip}:${port}`;
+      if (networkPrinters.some(p => `${p.ip}:${p.port}` === key)) { log('Printer already added: ' + key); return; }
+
+      const entry = { ip, port, type, selected: true };
+      if (type === 'receipt') { entry.name = `Receipt printer (${ip})`; entry.protocol = 'raw'; entry.widthDots = 576; }
+      else { entry.name = `Network printer (${ip})`; entry.protocol = 'raw'; entry.language = 'postscript'; }
+      networkPrinters.push(entry);
+      renderNetworkPrinters();
+      log('Added ' + type + ' printer: ' + key);
+    }
+
+    // --- Build + send ---
+    function getSelectedNetwork() {
+      return networkPrinters.filter(p => p.selected);
+    }
+
+    function buildPrintBody() {
+      const netSel = getSelectedNetwork();
+      const pdfUrl = document.getElementById('pdfUrl').value;
+      const html = document.getElementById('htmlContent').value;
+      const text = document.getElementById('receiptText').value;
+      const copies = parseInt(document.getElementById('copies').value || '1', 10);
+
+      if (netSel.length === 0) { log('ERROR: tick at least one network printer'); return null; }
+
+      const hasDoc = netSel.some(p => (p.type || 'document') !== 'receipt');
+      const hasReceipt = netSel.some(p => (p.type || 'document') === 'receipt');
+
+      if (hasDoc && !pdfUrl && !html) {
+        log('ERROR: a Document printer is selected — provide a PDF URL or HTML content.');
+        return null;
+      }
+      if (hasReceipt && !text && !html) {
+        log('ERROR: a Receipt printer is selected — provide Receipt Text (or HTML to rasterize).');
+        return null;
+      }
+
+      const body = { copies, networkPrinters: netSel };
+      if (pdfUrl) body.pdfUrl = pdfUrl;
+      else if (html) body.html = html;
+      if (text) body.text = text;
+      return body;
+    }
+
+    async function sendPrint() {
+      const base = document.getElementById('agentUrl').value;
+      const body = buildPrintBody();
+      if (!body) return;
+      try {
+        const res = await fetch(base + '/print', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        log('Print result: ' + JSON.stringify(await res.json(), null, 2));
+      } catch (err) { log('ERROR printing: ' + err.message); }
+    }
+
+    // --- WebSocket ---
+    function connectWs() {
+      const base = document.getElementById('agentUrl').value.replace('http', 'ws');
+      if (ws) ws.close();
+      setStatus('pending', '🟡 Connecting...');
+      ws = new WebSocket(base);
+      ws.onopen = () => { setStatus('connected', '🟢 Connected via WebSocket'); log('WebSocket connected'); };
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        log('WS received: ' + JSON.stringify(data));
+        if (data.type === 'networkPrinters') { mergePrinters(data.printers || []); renderNetworkPrinters(); }
+      };
+      ws.onclose = () => { setStatus('disconnected', '🔴 Disconnected'); log('WebSocket disconnected'); ws = null; };
+      ws.onerror = () => { setStatus('disconnected', '🔴 Connection error'); log('WebSocket error'); };
+    }
+
+    function sendPrintWs() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { log('ERROR: WebSocket not connected. Click "Connect" first.'); return; }
+      const body = buildPrintBody();
+      if (!body) return;
+      ws.send(JSON.stringify({ type: 'print', id: ++msgId, ...body }));
+      log('WS sent print request #' + msgId);
+    }
+  </script>
+</body>
+</html>

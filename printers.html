@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EbizTray — Printers</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 900px; margin: 32px auto; padding: 0 20px; color: #1e293b; background: #f8fafc; }
+    h1 { font-size: 22px; margin-bottom: 4px; }
+    .sub { color: #64748b; font-size: 14px; margin-top: 0; }
+
+    .toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
+    .toolbar .field { flex: 1; min-width: 220px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: #475569; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
+    button { padding: 9px 16px; background: #0066cc; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+    button:hover { background: #0052a3; }
+    button.secondary { background: #64748b; }
+    button.secondary:hover { background: #475569; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+
+    .status { font-size: 13px; padding: 6px 10px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+    .status.ok { background: #dcfce7; color: #15803d; }
+    .status.err { background: #fee2e2; color: #b91c1c; }
+    .status.pending { background: #fef9c3; color: #854d0e; }
+
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px 20px; margin-top: 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .card h2 { font-size: 16px; margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+    .card .count { background: #e2e8f0; color: #475569; border-radius: 10px; font-size: 12px; padding: 1px 9px; font-weight: 600; }
+    .card .hint { color: #94a3b8; font-size: 13px; margin: 0 0 12px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; color: #64748b; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; padding: 8px 10px; border-bottom: 2px solid #f1f5f9; }
+    td { padding: 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+    .empty { color: #94a3b8; font-size: 14px; padding: 12px 4px; }
+
+    .badge { font-size: 11px; border-radius: 10px; padding: 2px 9px; font-weight: 600; white-space: nowrap; }
+    .badge.raw { background: #dcfce7; color: #15803d; }
+    .badge.ipp { background: #dbeafe; color: #1d4ed8; }
+    .badge.lpd { background: #fef3c7; color: #92400e; }
+    .badge.mdns { background: #ede9fe; color: #6d28d9; }
+    .badge.scan { background: #e2e8f0; color: #475569; }
+    .badge.ready { background: #dcfce7; color: #15803d; }
+    .badge.offline { background: #fee2e2; color: #b91c1c; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .spin { display: inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <h1>🖨️ EbizTray Printers</h1>
+  <p class="sub">All printers installed on this computer and all printers visible on the local network.</p>
+
+  <div class="toolbar">
+    <div class="field">
+      <label for="agentUrl">Agent URL</label>
+      <input id="agentUrl" value="http://localhost:7654" />
+    </div>
+    <button id="refreshBtn" onclick="refreshAll()">Refresh All</button>
+    <button class="secondary" onclick="scanNetwork()">Scan Network</button>
+  </div>
+
+  <div id="connStatus" class="status pending">Connecting…</div>
+
+  <div class="card">
+    <h2>Installed Printers <span id="localCount" class="count">0</span></h2>
+    <p class="hint">Printers added on this computer (Windows / OS drivers).</p>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Driver</th><th>Port</th><th>Status</th></tr>
+      </thead>
+      <tbody id="localBody">
+        <tr><td colspan="4" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Network Printers <span id="netCount" class="count">0</span></h2>
+    <p class="hint">Printers visible on the local network (mDNS + port scan). No installation required to print to these.</p>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>IP Address</th><th>Port</th><th>Protocol</th><th>Found via</th></tr>
+      </thead>
+      <tbody id="netBody">
+        <tr><td colspan="5" class="empty">Click "Scan Network" or "Refresh All" to discover printers.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const PRINTER_STATUS = {
+      0: 'Ready', 1: 'Paused', 2: 'Error', 3: 'Pending Deletion',
+      4: 'Paper Jam', 5: 'Paper Out', 6: 'Manual Feed', 7: 'Paper Problem',
+      8: 'Offline', 9: 'IO Active', 10: 'Busy', 11: 'Printing'
+    };
+
+    function base() { return document.getElementById('agentUrl').value.replace(/\/+$/, ''); }
+
+    function setConn(state, text) {
+      const el = document.getElementById('connStatus');
+      el.className = 'status ' + state;
+      el.textContent = text;
+    }
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    async function loadLocal() {
+      const body = document.getElementById('localBody');
+      try {
+        const res = await fetch(base() + '/printers', { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderLocal(data.printers || []);
+        setConn('ok', '🟢 Connected to agent at ' + base());
+      } catch (err) {
+        body.innerHTML = `<tr><td colspan="4" class="empty">Could not load printers: ${esc(err.message)}</td></tr>`;
+        setConn('err', '🔴 Cannot reach agent at ' + base() + ' — is EbizTray running?');
+      }
+    }
+
+    function renderLocal(printers) {
+      const body = document.getElementById('localBody');
+      document.getElementById('localCount').textContent = printers.length;
+      if (printers.length === 0) {
+        body.innerHTML = '<tr><td colspan="4" class="empty">No installed printers found.</td></tr>';
+        return;
+      }
+      body.innerHTML = printers.map(p => {
+        if (typeof p === 'string') {
+          return `<tr><td>${esc(p)}</td><td>—</td><td>—</td><td>—</td></tr>`;
+        }
+        const statusText = PRINTER_STATUS[p.status] != null ? PRINTER_STATUS[p.status] : (p.status ?? '—');
+        const ready = p.status === 0 || p.status === undefined;
+        return `<tr>
+          <td>${esc(p.name)}</td>
+          <td>${esc(p.driver || '—')}</td>
+          <td class="mono">${esc(p.port || '—')}</td>
+          <td><span class="badge ${ready ? 'ready' : 'offline'}">${esc(statusText)}</span></td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function loadNetwork() {
+      const body = document.getElementById('netBody');
+      body.innerHTML = '<tr><td colspan="5" class="empty"><span class="spin">⏳</span> Scanning the network… this can take a few seconds.</td></tr>';
+      try {
+        const res = await fetch(base() + '/network-printers', { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderNetwork(data.printers || []);
+      } catch (err) {
+        body.innerHTML = `<tr><td colspan="5" class="empty">Could not scan network: ${esc(err.message)}</td></tr>`;
+      }
+    }
+
+    function renderNetwork(printers) {
+      const body = document.getElementById('netBody');
+      document.getElementById('netCount').textContent = printers.length;
+      if (printers.length === 0) {
+        body.innerHTML = '<tr><td colspan="5" class="empty">No network printers found on this subnet.</td></tr>';
+        return;
+      }
+      body.innerHTML = printers.map(p => {
+        const proto = p.protocol || 'raw';
+        const src = p.source || 'scan';
+        return `<tr>
+          <td>${esc(p.name || p.ip)}</td>
+          <td class="mono">${esc(p.ip)}</td>
+          <td class="mono">${esc(p.port || '—')}</td>
+          <td><span class="badge ${esc(proto)}">${esc(proto)}</span></td>
+          <td><span class="badge ${esc(src)}">${esc(src)}</span></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function scanNetwork() { loadNetwork(); }
+
+    function refreshAll() {
+      loadLocal();
+      loadNetwork();
+    }
+
+    // Load installed printers immediately on open; network scan on demand
+    // so the page is instant and the (slower) scan is user-triggered.
+    loadLocal();
+  </script>
+</body>
+</html>
