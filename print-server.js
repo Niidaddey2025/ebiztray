@@ -85,6 +85,179 @@ async function printFile(filePath, printerName, copies) {
 }
 
 // ---------------------------------------------------------------------------
+// Send RAW bytes (e.g. ESC/POS) straight to a locally-installed printer,
+// bypassing the printer driver's page rendering. This is the local equivalent
+// of streaming to a network receipt printer on port 9100 and is what makes
+// `render: 'text'` produce identical, crisp output on a locally-attached
+// thermal printer (e.g. Epson TM-T20III) instead of a reflowed A4 PDF.
+//
+// Windows: use the spooler's RAW datatype via winspool (WritePrinter).
+// macOS/Linux: use CUPS raw passthrough (`lp -o raw`).
+// ---------------------------------------------------------------------------
+function printRawToLocalPrinter(bytes, printerName, copies = 1) {
+  const numCopies = Math.max(1, copies || 1);
+  const rawFile = path.join(os.tmpdir(), `EbizTray-raw-${crypto.randomUUID()}.bin`);
+  fs.writeFileSync(rawFile, bytes);
+
+  if (process.platform === 'win32') {
+    const ps1File = path.join(os.tmpdir(), `EbizTray-raw-${crypto.randomUUID()}.ps1`);
+    fs.writeFileSync(ps1File, RAW_PRINT_PS1, 'utf8');
+
+    const cleanup = () => {
+      fs.unlink(rawFile, () => {});
+      fs.unlink(ps1File, () => {});
+    };
+
+    const sendOnce = () => new Promise((resolve, reject) => {
+      execFile('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', ps1File, '-PrinterName', printerName, '-FilePath', rawFile
+      ], { windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return reject(new Error((stderr || err.message || '').trim() || 'Raw print failed'));
+        resolve();
+      });
+    });
+
+    return (async () => {
+      try {
+        for (let i = 0; i < numCopies; i++) await sendOnce();
+      } finally {
+        cleanup();
+      }
+    })();
+  }
+
+  // macOS / Linux: CUPS raw passthrough.
+  return new Promise((resolve, reject) => {
+    execFile('lp', ['-d', printerName, '-o', 'raw', '-n', String(numCopies), rawFile], (err) => {
+      fs.unlink(rawFile, () => {});
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Check whether a locally-installed printer is online/ready.
+//
+// Windows: query Get-Printer's PrinterStatus + Win32_Printer.WorkOffline.
+// macOS/Linux: parse `lpstat -p` (disabled => offline).
+//
+// Returns { found, online, status }. NOTE: for some USB thermal printers the
+// OS keeps reporting "Normal" until a job actually fails, so a powered-off USB
+// printer may still appear online. Network printers are checked reliably via a
+// TCP probe instead.
+// ---------------------------------------------------------------------------
+function checkLocalPrinterOnline(printerName) {
+  if (!printerName) return Promise.resolve({ found: false, online: false, status: 'no-name' });
+
+  if (process.platform !== 'win32') {
+    return new Promise((resolve) => {
+      execFile('lpstat', ['-p', printerName], (err, stdout) => {
+        if (err) return resolve({ found: false, online: false, status: 'not-found' });
+        const disabled = /disabled/i.test(stdout);
+        resolve({ found: true, online: !disabled, status: disabled ? 'disabled' : 'idle' });
+      });
+    });
+  }
+
+  const safe = String(printerName).replace(/'/g, "''");
+  const cmd =
+    `try { ` +
+    `$p = Get-Printer -Name '${safe}' -ErrorAction Stop; ` +
+    `$w = Get-CimInstance Win32_Printer -Filter "Name='${safe}'" -ErrorAction SilentlyContinue; ` +
+    `$offline = $false; ` +
+    `if ("$($p.PrinterStatus)" -match 'Offline|Error|NotAvailable|Paused') { $offline = $true }; ` +
+    `if ($w -and $w.WorkOffline) { $offline = $true }; ` +
+    `[pscustomobject]@{ found=$true; online=(-not $offline); status="$($p.PrinterStatus)" } | ConvertTo-Json -Compress ` +
+    `} catch { [pscustomobject]@{ found=$false; online=$false; status='not-found' } | ConvertTo-Json -Compress }`;
+
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+      { windowsHide: true }, (err, stdout) => {
+        if (err) return resolve({ found: false, online: false, status: 'check-failed' });
+        try {
+          const o = JSON.parse(String(stdout).trim());
+          resolve({ found: !!o.found, online: !!o.online, status: o.status || 'unknown' });
+        } catch (e) {
+          resolve({ found: false, online: false, status: 'parse-failed' });
+        }
+      });
+  });
+}
+
+// Resolve the online status of a single print target (local or network).
+async function getTargetStatus(kind, target) {
+  if (kind === 'network') {
+    const online = await networkPrintersModule.checkNetworkPrinterOnline(target).catch(() => false);
+    return { found: true, online, status: online ? 'online' : 'offline' };
+  }
+  return checkLocalPrinterOnline(target.name).catch(() => ({ found: false, online: false, status: 'check-failed' }));
+}
+
+// Build a per-target online-status report for the requested printers.
+async function getPrintersStatus({ printerName, printers, networkPrinters }) {
+  const localTargets = (printers || (printerName ? [printerName] : []))
+    .map(t => (typeof t === 'string' ? { name: t } : t))
+    .filter(t => t && t.name);
+  const netTargets = Array.isArray(networkPrinters) ? networkPrinters : [];
+
+  const local = await Promise.all(localTargets.map(async t => ({
+    printer: t.name, type: 'local', ...(await getTargetStatus('local', t))
+  })));
+  const network = await Promise.all(netTargets.map(async t => ({
+    printer: t.name || `${t.ip}:${t.port || 9100}`, type: 'network', ...(await getTargetStatus('network', t))
+  })));
+
+  return { results: [...local, ...network] };
+}
+
+// PowerShell script that streams a file's bytes to a printer using the Windows
+// spooler RAW datatype (winspool WritePrinter). Written to a temp .ps1 and
+// invoked per print job.
+const RAW_PRINT_PS1 = `param([Parameter(Mandatory=$true)][string]$PrinterName, [Parameter(Mandatory=$true)][string]$FilePath)
+$ErrorActionPreference = 'Stop'
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+public class EbizRawPrinter {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DOCINFO {
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype;
+  }
+  [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool OpenPrinter(string src, out IntPtr hPrinter, IntPtr pd);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFO di);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] buf, int count, out int written);
+  public static void Send(string printerName, byte[] bytes) {
+    IntPtr h;
+    if (!OpenPrinter(printerName, out h, IntPtr.Zero)) throw new Exception("OpenPrinter failed for '" + printerName + "': " + Marshal.GetLastWin32Error());
+    try {
+      DOCINFO di = new DOCINFO();
+      di.pDocName = "EbizTray Receipt";
+      di.pDatatype = "RAW";
+      if (!StartDocPrinter(h, 1, ref di)) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
+      try {
+        if (!StartPagePrinter(h)) throw new Exception("StartPagePrinter failed: " + Marshal.GetLastWin32Error());
+        int written;
+        if (!WritePrinter(h, bytes, bytes.Length, out written)) throw new Exception("WritePrinter failed: " + Marshal.GetLastWin32Error());
+        EndPagePrinter(h);
+      } finally { EndDocPrinter(h); }
+    } finally { ClosePrinter(h); }
+  }
+}
+"@
+Add-Type -TypeDefinition $code
+$bytes = [System.IO.File]::ReadAllBytes($FilePath)
+[EbizRawPrinter]::Send($PrinterName, $bytes)
+`;
+
+// ---------------------------------------------------------------------------
 // HTML -> PDF
 // ---------------------------------------------------------------------------
 function findLocalChrome() {
@@ -174,11 +347,20 @@ async function htmlToReceiptPng(html, widthDots = 576) {
 //   text            - default text content for 'receipt' targets
 //   copies          - number of copies (default 1)
 //
+//   checkOnline     - when true (default), each target is checked for
+//                     reachability BEFORE printing. Offline targets are NOT
+//                     printed to and are reported with status 'offline'.
+//
 // Returns { status, results } where results is a per-target array of
-//   { printer, type: 'local'|'network', status: 'sent'|'failed', error? }
+//   { printer, type: 'local'|'network', status: 'sent'|'offline'|'failed',
+//     online, printerStatus?, error? }
 // ---------------------------------------------------------------------------
-async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies }) {
-  const localTargets = printers || (printerName ? [printerName] : []);
+async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline = true }) {
+  // Local targets may be a plain printer name (string) or an object carrying
+  // receipt options, e.g. { name, type:'receipt', render:'text', widthDots }.
+  const localTargets = (printers || (printerName ? [printerName] : []))
+    .map(t => (typeof t === 'string' ? { name: t } : t))
+    .filter(t => t && t.name);
   const netTargets = Array.isArray(networkPrinters) ? networkPrinters : [];
 
   if (localTargets.length === 0 && netTargets.length === 0) {
@@ -188,12 +370,43 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
   }
 
   const numCopies = copies || 1;
-  const isReceipt = (t) => t && (t.type === 'receipt' || t.type === 'escpos');
+  // A target is a thermal/ESC-POS receipt if it is explicitly typed as one, or
+  // (for local printers) if a receipt `render` mode is requested.
+  const isReceipt = (t) => t && (t.type === 'receipt' || t.type === 'escpos' ||
+    t.render === 'text' || t.render === 'image');
   const docNetTargets = netTargets.filter(t => !isReceipt(t));
   const receiptTargets = netTargets.filter(t => isReceipt(t));
+  const localReceiptTargets = localTargets.filter(isReceipt);
+  const localDocTargets = localTargets.filter(t => !isReceipt(t));
 
-  // A rendered PDF is needed for local printers and 'document' network printers.
-  const needsPdf = localTargets.length > 0 || docNetTargets.length > 0;
+  // Build a flat list of targets (with role metadata) so we can check each
+  // one's online status before doing any rendering or printing.
+  const targetMeta = [
+    ...localDocTargets.map(target => ({
+      kind: 'local', role: 'localDoc', target, label: target.name
+    })),
+    ...localReceiptTargets.map(target => ({
+      kind: 'local', role: 'localReceipt', target, label: `${target.name} (receipt)`
+    })),
+    ...docNetTargets.map(target => ({
+      kind: 'network', role: 'netDoc', target,
+      label: target.name || `${target.ip}${target.port ? ':' + target.port : ''}`
+    })),
+    ...receiptTargets.map(target => ({
+      kind: 'network', role: 'netReceipt', target,
+      label: target.name || `${target.ip}:${target.port || 9100} (receipt)`
+    }))
+  ];
+
+  // Pre-flight: resolve online status for every target. When checkOnline is
+  // disabled, every target is optimistically treated as online.
+  const statuses = checkOnline
+    ? await Promise.all(targetMeta.map(m => getTargetStatus(m.kind, m.target)))
+    : targetMeta.map(() => ({ found: true, online: true, status: 'unchecked' }));
+
+  const isDocRole = (role) => role === 'localDoc' || role === 'netDoc';
+  // A rendered PDF is only needed if at least one ONLINE document target exists.
+  const needsPdf = targetMeta.some((m, i) => isDocRole(m.role) && statuses[i].online);
   if (needsPdf && !pdfUrl && !html) {
     const err = new Error('Provide either pdfUrl or html for document/local printers');
     err.statusCode = 400;
@@ -257,38 +470,51 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
       }
     }
 
-    const jobs = [
-      ...localTargets.map(name => ({
-        type: 'local',
-        label: name,
-        run: () => printFile(pdfFile, name, numCopies)
-      })),
-      ...docNetTargets.map(target => ({
-        type: 'network',
-        label: target.name || `${target.ip}${target.port ? ':' + target.port : ''}`,
-        run: () => networkPrintersModule.printToNetworkPrinter(pdfFile, target, numCopies)
-      })),
-      ...receiptTargets.map(target => ({
-        type: 'network',
-        label: target.name || `${target.ip}:${target.port || 9100} (receipt)`,
-        run: async () => {
-          const bytes = await buildReceiptBytes(target);
-          return networkPrintersModule.printRawBytes(bytes, target.ip, target.port || 9100, numCopies);
-        }
-      }))
-    ];
+    // The actual print action for a single target, by role.
+    const runFor = (m) => {
+      switch (m.role) {
+        case 'localDoc':
+          return printFile(pdfFile, m.target.name, numCopies);
+        case 'localReceipt':
+          return buildReceiptBytes(m.target)
+            .then(bytes => printRawToLocalPrinter(bytes, m.target.name, numCopies));
+        case 'netDoc':
+          return networkPrintersModule.printToNetworkPrinter(pdfFile, m.target, numCopies);
+        case 'netReceipt':
+          return buildReceiptBytes(m.target)
+            .then(bytes => networkPrintersModule.printRawBytes(bytes, m.target.ip, m.target.port || 9100, numCopies));
+        default:
+          return Promise.reject(new Error('Unknown target role: ' + m.role));
+      }
+    };
 
-    // Print to every target simultaneously.
-    const settled = await Promise.allSettled(jobs.map(job => job.run()));
+    // Print to every ONLINE target simultaneously; offline targets are skipped.
+    const settled = await Promise.allSettled(targetMeta.map((m, i) =>
+      statuses[i].online ? runFor(m) : Promise.reject(Object.assign(
+        new Error(statuses[i].found === false ? 'Printer not found' : 'Printer offline'),
+        { offline: true }
+      ))
+    ));
 
-    const results = settled.map((result, i) => ({
-      printer: jobs[i].label,
-      type: jobs[i].type,
-      status: result.status === 'fulfilled' ? 'sent' : 'failed',
-      error: result.status === 'rejected' ? result.reason.message : undefined
-    }));
+    const results = settled.map((result, i) => {
+      const offline = result.status === 'rejected' && result.reason && result.reason.offline;
+      return {
+        printer: targetMeta[i].label,
+        type: targetMeta[i].kind,
+        status: result.status === 'fulfilled' ? 'sent' : (offline ? 'offline' : 'failed'),
+        online: statuses[i].online,
+        printerStatus: statuses[i].status,
+        error: result.status === 'rejected' && !offline ? result.reason.message : undefined
+      };
+    });
 
-    return { status: 'sent', results };
+    // Overall status: 'offline' if nothing could be sent because every target
+    // was offline; otherwise 'sent' (some/all succeeded) or 'failed'.
+    const anySent = results.some(r => r.status === 'sent');
+    const allOffline = results.length > 0 && results.every(r => r.status === 'offline');
+    const overall = allOffline ? 'offline' : (anySent ? 'sent' : 'failed');
+
+    return { status: overall, results };
   } finally {
     tempFiles.forEach(f => fs.unlink(f, () => {}));
   }
@@ -408,11 +634,22 @@ app.get('/network-printers', requireTrust, async (req, res) => {
   }
 });
 
+// Report the online/reachability status of the requested printers WITHOUT
+// printing anything. Body: { printerName | printers[], networkPrinters[] }.
+app.post('/printer-status', requireTrust, async (req, res) => {
+  const { printerName, printers, networkPrinters } = req.body || {};
+  try {
+    res.json(await getPrintersStatus({ printerName, printers, networkPrinters }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/print', requireTrust, async (req, res) => {
-  const { printerName, printers, networkPrinters, pdfUrl, html, text, copies } = req.body || {};
+  const { printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline } = req.body || {};
 
   try {
-    const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies });
+    const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline });
     res.json(result);
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
@@ -456,10 +693,17 @@ wss.on('connection', async (ws, req) => {
           break;
         }
 
+        case 'printerStatus': {
+          const { printerName, printers, networkPrinters } = msg;
+          const status = await getPrintersStatus({ printerName, printers, networkPrinters });
+          ws.send(JSON.stringify({ type: 'printerStatus', id: msg.id, ...status }));
+          break;
+        }
+
         case 'print': {
-          const { printerName, printers, networkPrinters, pdfUrl, html, text, copies } = msg;
+          const { printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline } = msg;
           try {
-            const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies });
+            const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline });
             ws.send(JSON.stringify({ type: 'printResult', id: msg.id, ...result }));
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', id: msg.id, message: err.message }));

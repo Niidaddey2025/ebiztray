@@ -55,6 +55,9 @@
       "assets/**/*",
       "node_modules/**/*"
     ],
+    "asarUnpack": [
+      "node_modules/pdf-to-printer/**/*"
+    ],
     "extraResources": [
       "assets/**/*"
     ]

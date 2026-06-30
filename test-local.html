@@ -65,6 +65,17 @@
     <label>HTML Content</label>
     <textarea id="htmlContent" rows="5" placeholder="<h1>Hello World</h1><p>This is a test print from EbizTray.</p>"></textarea>
 
+    <label>Render mode</label>
+    <select id="renderMode">
+      <option value="document">Document (PDF via driver) — laser/inkjet</option>
+      <option value="text">Receipt: ESC/POS text — thermal (crisp, aligned)</option>
+      <option value="image">Receipt: ESC/POS image — thermal (raster)</option>
+    </select>
+    <small class="hint">Use a Receipt mode for thermal POS printers (e.g. Epson TM-T20III). Sends native ESC/POS RAW to the local spooler.</small>
+
+    <label>Receipt width (dots) <small class="hint">576 = 80mm, 384 = 58mm</small></label>
+    <input id="widthDots" type="number" value="576" min="128" step="8" />
+
     <label>Copies</label>
     <input id="copies" type="number" value="1" min="1" />
 
@@ -129,16 +140,28 @@
     }
 
     function buildPrintBody() {
-      const printers = getSelectedLocal();
+      const names = getSelectedLocal();
       const pdfUrl = document.getElementById('pdfUrl').value;
       const html = document.getElementById('htmlContent').value;
       const copies = parseInt(document.getElementById('copies').value || '1', 10);
+      const renderMode = document.getElementById('renderMode').value;
+      const widthDots = parseInt(document.getElementById('widthDots').value || '576', 10);
 
-      if (printers.length === 0) { log('ERROR: select at least one local printer'); return null; }
+      if (names.length === 0) { log('ERROR: select at least one local printer'); return null; }
       if (!pdfUrl && !html) { log('ERROR: provide a PDF URL or HTML content'); return null; }
 
+      // Receipt modes need HTML (or text) — they cannot rasterize a remote PDF.
+      const isReceipt = renderMode === 'text' || renderMode === 'image';
+      if (isReceipt && !html) { log('ERROR: receipt modes require HTML content'); return null; }
+
+      const printers = isReceipt
+        ? names.map(name => ({ name, type: 'receipt', render: renderMode, widthDots }))
+        : names;
+
       const body = { printers, copies };
-      if (pdfUrl) body.pdfUrl = pdfUrl; else body.html = html;
+      if (isReceipt) body.html = html;
+      else if (pdfUrl) body.pdfUrl = pdfUrl;
+      else body.html = html;
       return body;
     }
 

@@ -16,12 +16,37 @@ async function getPrinters() {
 }
 
 // ---------------------------------------------------------------------------
-// Send an HTML receipt/KOT to the thermal printer.
+// Check whether a printer is online/reachable BEFORE printing.
+// Returns the agent's status report: { results: [{ printer, type, online, ... }] }.
+// ---------------------------------------------------------------------------
+function checkPrinterStatus(printerName) {
+    return fetch(AGENT_URL + "/printer-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ printers: [{ name: printerName }] })
+    }).then(r => r.json());
+}
+
+// ---------------------------------------------------------------------------
+// Send an HTML receipt/KOT to a thermal printer.
+//
+// `printerName` is the name of a locally-installed thermal printer (e.g. an
+// Epson TM-T20III shared/attached to the agent machine). It is rendered to
+// native ESC/POS (`render: 'text'`) and sent RAW to the local spooler so the
+// layout matches the network receipt printer exactly. Pass widthDots to match
+// the paper: 576 for 80mm, 384 for 58mm.
+//
+// The agent automatically checks the printer is online first (checkOnline is
+// on by default). If it is offline the job is NOT sent and the result for that
+// target has status "offline".
 // ---------------------------------------------------------------------------
 function printKOT(htmlContent, printerName) {
     const payload = {
-        networkPrinters: [KOT_PRINTER],
-        html: htmlContent
+        printers: [
+            { name: printerName, type: "receipt", render: "text", widthDots: 576 }
+        ],
+        html: htmlContent,
+        checkOnline: true
     };
 
     return fetch(AGENT_URL + "/print", {
@@ -32,6 +57,11 @@ function printKOT(htmlContent, printerName) {
     .then(r => r.json())
     .then(function (result) {
         console.log("Print result:", result);
+        // Surface offline printers to the caller.
+        const offline = (result.results || []).filter(r => r.status === "offline");
+        if (offline.length) {
+            console.warn("Printer offline, not printed:", offline.map(r => r.printer).join(", "));
+        }
         return result;
     })
     .catch(function (err) {

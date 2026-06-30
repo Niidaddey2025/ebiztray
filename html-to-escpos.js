@@ -63,6 +63,36 @@ function extractTokens() {
     return d === 'block' || d === 'flex' || d === 'grid' || d === 'table' || d === 'list-item';
   };
 
+  // If `el` is a horizontal CSS flex/grid "row" of simple cells (e.g. a
+  // label/value pair laid out side-by-side), return its cells so it can be
+  // rendered as one aligned table row. Returns null if it isn't such a row.
+  const flexRowCells = (el) => {
+    if (!el || el.nodeType !== 1) return null;
+    const cs = getComputedStyle(el);
+    const isRowLayout =
+      (cs.display === 'flex' && !(cs.flexDirection || 'row').startsWith('column')) ||
+      (cs.display === 'grid' && (cs.gridTemplateColumns || 'none') !== 'none');
+    if (!isRowLayout) return null;
+
+    const kids = Array.from(el.children).filter(k => k.nodeType === 1 && !isHidden(k));
+    if (kids.length < 2) return null;
+
+    const cells = [];
+    for (const k of kids) {
+      // Each cell must be a simple text cell: no nested blocks or special media.
+      if (Array.from(k.children).some(isBlockish)) return null;
+      if (k.querySelector && k.querySelector('img, [data-qr], hr, table')) return null;
+      const kcs = getComputedStyle(k);
+      let a = kcs.textAlign;
+      if (a === 'start' || a === 'justify' || !a) a = 'left';
+      if (a === 'end') a = 'right';
+      const bold = parseInt(kcs.fontWeight, 10) >= 600 || kcs.fontWeight === 'bold';
+      const text = (k.innerText || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+      cells.push({ text, align: a, bold });
+    }
+    return cells.length >= 2 ? cells : null;
+  };
+
   const walk = (el) => {
     if (el.nodeType !== 1 || isHidden(el)) return;
 
@@ -85,6 +115,24 @@ function extractTokens() {
     }
     if (el.tagName === 'HR') { tokens.push({ kind: 'rule' }); return; }
     if (el.tagName === 'BR') { tokens.push({ kind: 'break' }); return; }
+
+    // An empty block whose only visual is a top/bottom border is a separator
+    // line (e.g. <div style="border-top:1px dashed #000"></div>). Emit a rule.
+    {
+      const hasText = (el.innerText || '').trim().length > 0;
+      const hasSpecial = !!el.querySelector('img, [data-qr], hr, table');
+      if (!hasText && !hasSpecial) {
+        const cs = getComputedStyle(el);
+        const topW = parseFloat(cs.borderTopWidth) || 0;
+        const botW = parseFloat(cs.borderBottomWidth) || 0;
+        const topOn = cs.borderTopStyle !== 'none' && topW > 0;
+        const botOn = cs.borderBottomStyle !== 'none' && botW > 0;
+        if (topOn || botOn) {
+          tokens.push({ kind: 'rule', style: topOn ? cs.borderTopStyle : cs.borderBottomStyle });
+          return;
+        }
+      }
+    }
 
     if (el.tagName === 'TABLE') {
       const rows = [];
@@ -122,25 +170,36 @@ function extractTokens() {
       return;
     }
 
-    // Container: recurse, emitting interspersed text nodes with this style.
+    // Container: recurse, batching consecutive flex rows into aligned tables.
+    processChildren(el);
+  };
+
+  // Walk a container's children. Consecutive CSS flex/grid "rows" are collected
+  // and emitted as a SINGLE table token so their columns align across rows
+  // (e.g. the colons in "Order No : 1978" / "Order Time : ..." line up).
+  const processChildren = (el) => {
+    let flexRun = [];
+    const flushFlex = () => {
+      if (flexRun.length) {
+        tokens.push({ kind: 'table', rows: flexRun.map(cells => ({ cells })) });
+        flexRun = [];
+      }
+    };
     for (const node of el.childNodes) {
       if (node.nodeType === 3) {
         const t = collapse(node.textContent);
-        if (t) { const s = styleOf(el); tokens.push({ kind: 'text', text: t, ...s }); }
+        if (t) { flushFlex(); const s = styleOf(el); tokens.push({ kind: 'text', text: t, ...s }); }
       } else if (node.nodeType === 1) {
-        walk(node);
+        if (isHidden(node)) continue;
+        const cells = flexRowCells(node);
+        if (cells) flexRun.push(cells);
+        else { flushFlex(); walk(node); }
       }
     }
+    flushFlex();
   };
 
-  for (const node of document.body.childNodes) {
-    if (node.nodeType === 3) {
-      const t = collapse(node.textContent);
-      if (t) tokens.push({ kind: 'text', text: t, align: 'left', bold: false, wMul: 1, hMul: 1 });
-    } else if (node.nodeType === 1) {
-      walk(node);
-    }
-  }
+  processChildren(document.body);
   return tokens;
 }
 
@@ -241,7 +300,9 @@ async function htmlToEscpos(html, options = {}) {
 
     const { cmd } = escpos;
     const charsPerLine = Math.max(16, Math.floor(widthDots / 12)); // Font A ~12 dots wide
-    const parts = [cmd.init()];
+    // ESC t 0 -> select code page PC437 so byte 0xC4 prints as a continuous
+    // horizontal line (used for separator rules, matching a thin solid border).
+    const parts = [cmd.init(), Buffer.from([0x1b, 0x74, 0x00])];
 
     for (const t of tokens) {
       switch (t.kind) {
@@ -256,7 +317,9 @@ async function htmlToEscpos(html, options = {}) {
         }
         case 'rule': {
           parts.push(cmd.align('left'));
-          parts.push(Buffer.from('-'.repeat(charsPerLine) + '\n', 'latin1'));
+          // Continuous solid line (PC437 0xC4 '─'); dotted borders use dots.
+          const fill = t.style === 'dotted' ? '.' : '\u00c4';
+          parts.push(Buffer.from(fill.repeat(charsPerLine) + '\n', 'latin1'));
           break;
         }
         case 'break': {

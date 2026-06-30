@@ -1,6 +1,15 @@
-const { app, dialog, BrowserWindow, Notification } = require('electron');
+const { app, dialog, BrowserWindow, Notification, nativeImage } = require('electron');
+const path = require('path');
 const { startServer, setApprovalCallback } = require('./print-server');
 const { createTray, updateContextMenu, destroyTray } = require('./tray-manager');
+
+// App icon shown in dialogs and notifications (not just the tray).
+const appIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray-icon.png'));
+
+// Required on Windows for notifications to display the app icon/identity.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.EbizTray.print-agent');
+}
 
 // Prevent multiple instances
 const gotLock = app.requestSingleInstanceLock();
@@ -32,6 +41,7 @@ function showApprovalDialog(origin) {
       buttons: ['Allow', 'Deny'],
       defaultId: 0,
       cancelId: 1,
+      icon: appIcon,
       title: 'EbizTray - New Print Request',
       message: `Allow printing from this origin?`,
       detail: `"${origin}" is requesting access to your printers.\n\nIf you allow, this origin will be trusted permanently and won't ask again.\n\nYou can revoke trust later from the tray icon menu.`,
@@ -44,7 +54,8 @@ function showApprovalDialog(origin) {
         if (Notification.isSupported()) {
           new Notification({
             title: 'EbizTray',
-            body: `${origin} is now trusted for printing.`
+            body: `${origin} is now trusted for printing.`,
+            icon: appIcon
           }).show();
         }
         // Refresh tray menu to show new trusted origin
@@ -84,7 +95,8 @@ app.whenReady().then(async () => {
   if (Notification.isSupported()) {
     new Notification({
       title: 'EbizTray',
-      body: `Print agent running on port ${serverPort}. Right-click tray icon for options.`
+      body: `Print agent running on port ${serverPort}. Right-click tray icon for options.`,
+      icon: appIcon
     }).show();
   }
 });

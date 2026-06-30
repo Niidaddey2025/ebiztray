@@ -459,6 +459,24 @@ async function printToNetworkPrinter(filePath, target, copies = 1) {
   }
 }
 
+/**
+ * Check whether a network printer is online/reachable by opening a TCP
+ * connection to its printing port. Resolves true if the port accepts a
+ * connection within `timeout` ms.
+ *
+ * target = { ip, port, protocol }
+ */
+function checkNetworkPrinterOnline(target, timeout = 1500) {
+  const ip = target && target.ip;
+  if (!ip) return Promise.resolve(false);
+  let port = target.port;
+  if (!port) {
+    const protocol = target.protocol;
+    port = protocol === 'ipp' ? 631 : protocol === 'lpd' ? 515 : 9100;
+  }
+  return probePort(ip, port, timeout);
+}
+
 module.exports = {
   discoverNetworkPrinters,
   discoverMdns,
@@ -467,5 +485,7 @@ module.exports = {
   printRawBytes,
   convertPdf,
   findGhostscript,
-  getLocalSubnets
+  getLocalSubnets,
+  probePort,
+  checkNetworkPrinterOnline
 };
