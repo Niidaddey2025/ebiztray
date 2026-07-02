@@ -10,6 +10,7 @@ const { WebSocketServer } = require('ws');
 const http = require('http');
 const trustManager = require('./trust-manager');
 const networkPrintersModule = require('./network-printers');
+const remotePrintersModule = require('./remote-printers');
 const escpos = require('./escpos-renderer');
 const { htmlToEscpos } = require('./html-to-escpos');
 
@@ -186,21 +187,27 @@ function checkLocalPrinterOnline(printerName) {
   });
 }
 
-// Resolve the online status of a single print target (local or network).
+// Resolve the online status of a single print target (local, network, remote).
 async function getTargetStatus(kind, target) {
   if (kind === 'network') {
     const online = await networkPrintersModule.checkNetworkPrinterOnline(target).catch(() => false);
     return { found: true, online, status: online ? 'online' : 'offline' };
   }
+  if (kind === 'remote') {
+    const online = await remotePrintersModule.checkComputerOnline(target.pcName).catch(() => false);
+    return { found: online, online, status: online ? 'online' : 'offline' };
+  }
   return checkLocalPrinterOnline(target.name).catch(() => ({ found: false, online: false, status: 'check-failed' }));
 }
 
 // Build a per-target online-status report for the requested printers.
-async function getPrintersStatus({ printerName, printers, networkPrinters }) {
+async function getPrintersStatus({ printerName, printers, networkPrinters, remotePrinters }) {
   const localTargets = (printers || (printerName ? [printerName] : []))
     .map(t => (typeof t === 'string' ? { name: t } : t))
     .filter(t => t && t.name);
   const netTargets = Array.isArray(networkPrinters) ? networkPrinters : [];
+  const remoteTargets = (Array.isArray(remotePrinters) ? remotePrinters : [])
+    .filter(t => t && t.pcName && t.name);
 
   const local = await Promise.all(localTargets.map(async t => ({
     printer: t.name, type: 'local', ...(await getTargetStatus('local', t))
@@ -208,8 +215,12 @@ async function getPrintersStatus({ printerName, printers, networkPrinters }) {
   const network = await Promise.all(netTargets.map(async t => ({
     printer: t.name || `${t.ip}:${t.port || 9100}`, type: 'network', ...(await getTargetStatus('network', t))
   })));
+  const remote = await Promise.all(remoteTargets.map(async t => ({
+    printer: `${t.pcName}\\${t.name}`, type: 'remote', pcName: t.pcName,
+    ...(await getTargetStatus('remote', t))
+  })));
 
-  return { results: [...local, ...network] };
+  return { results: [...local, ...network, ...remote] };
 }
 
 // PowerShell script that streams a file's bytes to a printer using the Windows
@@ -355,16 +366,20 @@ async function htmlToReceiptPng(html, widthDots = 576) {
 //   { printer, type: 'local'|'network', status: 'sent'|'offline'|'failed',
 //     online, printerStatus?, error? }
 // ---------------------------------------------------------------------------
-async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline = true }) {
+async function doPrintJob({ printerName, printers, networkPrinters, remotePrinters, pdfUrl, html, text, copies, checkOnline = true }) {
   // Local targets may be a plain printer name (string) or an object carrying
   // receipt options, e.g. { name, type:'receipt', render:'text', widthDots }.
   const localTargets = (printers || (printerName ? [printerName] : []))
     .map(t => (typeof t === 'string' ? { name: t } : t))
     .filter(t => t && t.name);
   const netTargets = Array.isArray(networkPrinters) ? networkPrinters : [];
+  // Remote targets are printers attached to another PC on the LAN and shared,
+  // addressed as \\pcName\name. Each: { pcName, name, type, render, widthDots }.
+  const remoteTargets = (Array.isArray(remotePrinters) ? remotePrinters : [])
+    .filter(t => t && t.pcName && t.name);
 
-  if (localTargets.length === 0 && netTargets.length === 0) {
-    const err = new Error('printerName, printers[] or networkPrinters[] is required');
+  if (localTargets.length === 0 && netTargets.length === 0 && remoteTargets.length === 0) {
+    const err = new Error('printerName, printers[], networkPrinters[] or remotePrinters[] is required');
     err.statusCode = 400;
     throw err;
   }
@@ -378,6 +393,8 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
   const receiptTargets = netTargets.filter(t => isReceipt(t));
   const localReceiptTargets = localTargets.filter(isReceipt);
   const localDocTargets = localTargets.filter(t => !isReceipt(t));
+  const remoteReceiptTargets = remoteTargets.filter(isReceipt);
+  const remoteDocTargets = remoteTargets.filter(t => !isReceipt(t));
 
   // Build a flat list of targets (with role metadata) so we can check each
   // one's online status before doing any rendering or printing.
@@ -395,6 +412,12 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
     ...receiptTargets.map(target => ({
       kind: 'network', role: 'netReceipt', target,
       label: target.name || `${target.ip}:${target.port || 9100} (receipt)`
+    })),
+    ...remoteDocTargets.map(target => ({
+      kind: 'remote', role: 'remoteDoc', target, label: `${target.pcName}\\${target.name}`
+    })),
+    ...remoteReceiptTargets.map(target => ({
+      kind: 'remote', role: 'remoteReceipt', target, label: `${target.pcName}\\${target.name} (receipt)`
     }))
   ];
 
@@ -404,7 +427,7 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
     ? await Promise.all(targetMeta.map(m => getTargetStatus(m.kind, m.target)))
     : targetMeta.map(() => ({ found: true, online: true, status: 'unchecked' }));
 
-  const isDocRole = (role) => role === 'localDoc' || role === 'netDoc';
+  const isDocRole = (role) => role === 'localDoc' || role === 'netDoc' || role === 'remoteDoc';
   // A rendered PDF is only needed if at least one ONLINE document target exists.
   const needsPdf = targetMeta.some((m, i) => isDocRole(m.role) && statuses[i].online);
   if (needsPdf && !pdfUrl && !html) {
@@ -483,6 +506,11 @@ async function doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html
         case 'netReceipt':
           return buildReceiptBytes(m.target)
             .then(bytes => networkPrintersModule.printRawBytes(bytes, m.target.ip, m.target.port || 9100, numCopies));
+        case 'remoteDoc':
+          return printFile(pdfFile, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies);
+        case 'remoteReceipt':
+          return buildReceiptBytes(m.target)
+            .then(bytes => printRawToLocalPrinter(bytes, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies));
         default:
           return Promise.reject(new Error('Unknown target role: ' + m.role));
       }
@@ -603,7 +631,7 @@ app.get(['/', '/printers.html'], (req, res) => {
 });
 
 // Serve the test client pages (combined + split local/network).
-['test-client.html', 'test-local.html', 'test-network.html'].forEach(name => {
+['test-client.html', 'test-local.html', 'test-network.html', 'test-remote.html'].forEach(name => {
   app.get('/' + name, (req, res) => {
     const file = path.join(__dirname, name);
     if (fs.existsSync(file)) return res.sendFile(file);
@@ -634,22 +662,52 @@ app.get('/network-printers', requireTrust, async (req, res) => {
   }
 });
 
-// Report the online/reachability status of the requested printers WITHOUT
-// printing anything. Body: { printerName | printers[], networkPrinters[] }.
-app.post('/printer-status', requireTrust, async (req, res) => {
-  const { printerName, printers, networkPrinters } = req.body || {};
+// Discover shared printers on remote PCs on the LAN.
+// Query: ?computers=PC1,PC2 (or repeated). If omitted, uses the persisted known list.
+app.get('/remote-printers', requireTrust, async (req, res) => {
+  let computers;
+  if (req.query.computers) {
+    computers = Array.isArray(req.query.computers)
+      ? req.query.computers
+      : req.query.computers.split(',').map(c => c.trim()).filter(Boolean);
+  } else {
+    computers = trustManager.getRemoteComputers();
+  }
   try {
-    res.json(await getPrintersStatus({ printerName, printers, networkPrinters }));
+    const results = await remotePrintersModule.listRemotePrintersForComputers(computers);
+    res.json({ computers, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Read/write the persisted list of known remote computers.
+app.get('/remote-computers', requireTrust, async (req, res) => {
+  res.json({ computers: trustManager.getRemoteComputers() });
+});
+
+app.post('/remote-computers', requireTrust, async (req, res) => {
+  const { computers } = req.body || {};
+  const cleaned = trustManager.setRemoteComputers(computers);
+  res.json({ computers: cleaned });
+});
+
+// Report the online/reachability status of the requested printers WITHOUT
+// printing anything. Body: { printerName | printers[], networkPrinters[], remotePrinters[] }.
+app.post('/printer-status', requireTrust, async (req, res) => {
+  const { printerName, printers, networkPrinters, remotePrinters } = req.body || {};
+  try {
+    res.json(await getPrintersStatus({ printerName, printers, networkPrinters, remotePrinters }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/print', requireTrust, async (req, res) => {
-  const { printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline } = req.body || {};
+  const { printerName, printers, networkPrinters, remotePrinters, pdfUrl, html, text, copies, checkOnline } = req.body || {};
 
   try {
-    const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline });
+    const result = await doPrintJob({ printerName, printers, networkPrinters, remotePrinters, pdfUrl, html, text, copies, checkOnline });
     res.json(result);
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });
@@ -693,17 +751,35 @@ wss.on('connection', async (ws, req) => {
           break;
         }
 
+        case 'discoverRemotePrinters': {
+          const computers = msg.computers || trustManager.getRemoteComputers();
+          const results = await remotePrintersModule.listRemotePrintersForComputers(computers);
+          ws.send(JSON.stringify({ type: 'remotePrinters', id: msg.id, computers, results }));
+          break;
+        }
+
+        case 'listRemoteComputers': {
+          ws.send(JSON.stringify({ type: 'remoteComputers', id: msg.id, computers: trustManager.getRemoteComputers() }));
+          break;
+        }
+
+        case 'setRemoteComputers': {
+          const cleaned = trustManager.setRemoteComputers(msg.computers);
+          ws.send(JSON.stringify({ type: 'remoteComputers', id: msg.id, computers: cleaned }));
+          break;
+        }
+
         case 'printerStatus': {
-          const { printerName, printers, networkPrinters } = msg;
-          const status = await getPrintersStatus({ printerName, printers, networkPrinters });
+          const { printerName, printers, networkPrinters, remotePrinters } = msg;
+          const status = await getPrintersStatus({ printerName, printers, networkPrinters, remotePrinters });
           ws.send(JSON.stringify({ type: 'printerStatus', id: msg.id, ...status }));
           break;
         }
 
         case 'print': {
-          const { printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline } = msg;
+          const { printerName, printers, networkPrinters, remotePrinters, pdfUrl, html, text, copies, checkOnline } = msg;
           try {
-            const result = await doPrintJob({ printerName, printers, networkPrinters, pdfUrl, html, text, copies, checkOnline });
+            const result = await doPrintJob({ printerName, printers, networkPrinters, remotePrinters, pdfUrl, html, text, copies, checkOnline });
             ws.send(JSON.stringify({ type: 'printResult', id: msg.id, ...result }));
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', id: msg.id, message: err.message }));

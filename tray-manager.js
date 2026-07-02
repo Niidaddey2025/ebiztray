@@ -60,6 +60,12 @@ function updateContextMenu(app, port) {
         shell.openExternal(`http://localhost:${port}/printers.html`);
       }
     },
+    {
+      label: 'Remote Printers',
+      click: () => {
+        shell.openExternal(`http://localhost:${port}/test-remote.html`);
+      }
+    },
     { type: 'separator' },
     {
       label: 'Quit EbizTray',

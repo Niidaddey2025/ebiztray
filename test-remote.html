@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>EbizTray — Remote Printers</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; }
+    h2 { color: #1a1a1a; margin-bottom: 4px; }
+    .nav { display: flex; gap: 8px; margin: 12px 0 4px; }
+    .nav a { font-size: 13px; text-decoration: none; padding: 6px 12px; border: 1px solid #ccc; border-radius: 6px; color: #0066cc; }
+    .nav a.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+    .status { padding: 8px 12px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .status.pending { background: #fff3cd; color: #856404; }
+    label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; }
+    input, select, textarea { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    button { margin-top: 16px; padding: 10px 20px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #0052a3; }
+    .btn-secondary { background: #6c757d; }
+    .btn-secondary:hover { background: #5a6268; }
+    .btn-danger { background: #dc3545; }
+    .btn-danger:hover { background: #c82333; }
+    pre { background: #f8f9fa; padding: 12px; white-space: pre-wrap; border-radius: 4px; border: 1px solid #e9ecef; font-size: 13px; max-height: 300px; overflow-y: auto; }
+    .section { margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee; }
+    .row { display: flex; gap: 8px; align-items: flex-end; }
+    .row > div { flex: 1; }
+    .row button { margin-top: 0; flex: 0 0 auto; }
+    small.hint { color: #888; font-weight: 400; }
+
+    .pc-card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
+    .pc-card.offline { background: #fff5f5; border-color: #feb2b2; }
+    .pc-head { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+    .pc-head .addr { color: #888; font-weight: 400; font-size: 12px; }
+    .printer-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f1f5f9; }
+    .printer-item:last-child { border-bottom: none; }
+    .printer-item input[type=checkbox] { width: auto; margin: 0; }
+    .printer-item .name { flex: 1; font-size: 14px; }
+    .printer-item .badge { font-size: 11px; border-radius: 10px; padding: 2px 9px; font-weight: 600; }
+    .badge.ready { background: #dcfce7; color: #15803d; }
+    .badge.offline { background: #fee2e2; color: #b91c1c; }
+    .badge.document { background: #dbeafe; color: #1d4ed8; }
+    .badge.receipt { background: #ede9fe; color: #6d28d9; }
+    .empty { color: #888; font-size: 13px; text-align: center; padding: 8px; }
+    .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag { display: inline-flex; align-items: center; gap: 6px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 16px; padding: 4px 10px; font-size: 13px; }
+    .tag button { margin: 0; padding: 0 2px; background: transparent; color: #64748b; font-size: 16px; line-height: 1; }
+    .tag button:hover { color: #dc3545; background: transparent; }
+  </style>
+</head>
+<body>
+  <h2>🖥️ EbizTray — Remote Printers</h2>
+  <div class="nav">
+    <a href="/test-local.html">Local Printers</a>
+    <a href="/test-network.html">Network Printers</a>
+    <a href="/test-remote.html" class="active">Remote Printers</a>
+    <a href="/printers.html">View All</a>
+  </div>
+  <p style="font-size:14px;color:#666;">Print to <strong>shared printers on other Windows PCs</strong> on the LAN. The remote PCs must have File &amp; Printer Sharing enabled and the printer shared.</p>
+
+  <div id="wsStatus" class="status disconnected">⚪ Not connected</div>
+
+  <label>Agent URL</label>
+  <input id="agentUrl" value="http://localhost:7654" />
+
+  <div style="display:flex; gap:8px; margin-top:12px;">
+    <button onclick="connectWs()">Connect (WebSocket)</button>
+    <button onclick="checkHealth()" class="btn-secondary">Check Health (HTTP)</button>
+  </div>
+
+  <div class="section">
+    <h3>Known Remote Computers</h3>
+    <p style="font-size:13px;color:#666;">These computer names are stored in EbizTray's config. Example: <code>BAR-PC</code>, <code>KITCHEN-PC</code>.</p>
+    <div class="row">
+      <div>
+        <small class="hint">Computer name</small>
+        <input id="newComputer" placeholder="KITCHEN-PC" onkeydown="if(event.key==='Enter')addComputer()" />
+      </div>
+      <button onclick="addComputer()">Add</button>
+      <button onclick="saveComputers()" class="btn-secondary">Save List</button>
+    </div>
+    <div id="computerTags" class="tag-list"></div>
+  </div>
+
+  <div class="section">
+    <h3>Discover Shared Printers</h3>
+    <button onclick="discoverRemotePrinters()">Discover Remote Printers</button>
+    <small class="hint">Probes SMB ports and lists shared printer names on each known computer.</small>
+    <div id="remotePrinterList"><div class="empty">No remote printers discovered yet.</div></div>
+  </div>
+
+  <div class="section">
+    <h3>Print</h3>
+    <p style="font-size:13px;color:#666;">Tick printers above, then choose whether each should receive a <em>Document</em> (PDF/HTML via driver) or <em>Receipt</em> (ESC/POS RAW).</p>
+
+    <label>Kind for selected printers</label>
+    <select id="printerKind">
+      <option value="receipt">Receipt (thermal/ESC/POS)</option>
+      <option value="document">Document (laser/inkjet via driver)</option>
+    </select>
+
+    <label>PDF URL <small class="hint">(documents only; leave blank to use HTML)</small></label>
+    <input id="pdfUrl" placeholder="https://example.com/invoice.pdf" />
+
+    <label>HTML Content</label>
+    <textarea id="htmlContent" rows="5" placeholder="<h1>Hello World</h1><p>This is a remote print test.</p>"></textarea>
+
+    <label>Receipt Text <small class="hint">(receipt printers; if blank, the HTML above is rasterized to the receipt width)</small></label>
+    <textarea id="receiptText" rows="3" placeholder="*** ORDER #123 ***&#10;1x Coffee     2.50&#10;Total:        2.50"></textarea>
+
+    <label>Default receipt render</label>
+    <select id="renderMode">
+      <option value="text">ESC/POS text (crisp, aligned)</option>
+      <option value="image">ESC/POS image (raster)</option>
+    </select>
+
+    <label>Receipt width (dots) <small class="hint">576 = 80mm, 384 = 58mm</small></label>
+    <input id="widthDots" type="number" value="576" min="128" step="8" />
+
+    <label>Copies</label>
+    <input id="copies" type="number" value="1" min="1" />
+
+    <div style="display:flex; gap:8px; margin-top:16px;">
+      <button onclick="checkSelectedStatus()">Check Selected Status</button>
+      <button onclick="sendPrint()">Print</button>
+      <button onclick="sendPrintWs()" class="btn-secondary">Print (WebSocket)</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Log</h3>
+    <pre id="result">Waiting for actions...</pre>
+  </div>
+
+  <script>
+    let ws = null;
+    let msgId = 0;
+    let remoteComputers = [];
+    let discovered = []; // { pcName, online, printers: [{ name, shareName, displayName, driver, status }], error }
+
+    function log(msg) {
+      const el = document.getElementById('result');
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent;
+    }
+    function setStatus(state, text) {
+      const el = document.getElementById('wsStatus');
+      el.className = 'status ' + state;
+      el.textContent = text;
+    }
+
+    function base() { return document.getElementById('agentUrl').value.replace(/\/+$/, ''); }
+
+    async function checkHealth() {
+      try {
+        const res = await fetch(base() + '/health');
+        log('Health: ' + JSON.stringify(await res.json()));
+      } catch (err) { log('ERROR: ' + err.message); }
+    }
+
+    // --- Known computer management ---
+    function renderComputers() {
+      const box = document.getElementById('computerTags');
+      box.innerHTML = '';
+      if (remoteComputers.length === 0) {
+        box.innerHTML = '<span class="hint">No remote computers saved.</span>';
+        return;
+      }
+      remoteComputers.forEach((pc, i) => {
+        const tag = document.createElement('div');
+        tag.className = 'tag';
+        tag.innerHTML = `<span>${pc}</span><button onclick="removeComputer(${i})" title="Remove">&times;</button>`;
+        box.appendChild(tag);
+      });
+    }
+
+    async function loadComputers() {
+      try {
+        const res = await fetch(base() + '/remote-computers', { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        remoteComputers = Array.isArray(data.computers) ? data.computers : [];
+        renderComputers();
+        log('Loaded remote computers: ' + JSON.stringify(remoteComputers));
+      } catch (err) { log('ERROR loading computers: ' + err.message); }
+    }
+
+    function addComputer() {
+      const input = document.getElementById('newComputer');
+      const name = input.value.trim().replace(/^\\+/, '');
+      if (!name) { log('ERROR: enter a computer name'); return; }
+      if (remoteComputers.includes(name)) { log('Computer already in list: ' + name); return; }
+      remoteComputers.push(name);
+      input.value = '';
+      renderComputers();
+    }
+
+    function removeComputer(i) {
+      remoteComputers.splice(i, 1);
+      renderComputers();
+    }
+
+    async function saveComputers() {
+      try {
+        const res = await fetch(base() + '/remote-computers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ computers: remoteComputers })
+        });
+        const data = await res.json();
+        remoteComputers = Array.isArray(data.computers) ? data.computers : [];
+        renderComputers();
+        log('Saved remote computers: ' + JSON.stringify(remoteComputers));
+      } catch (err) { log('ERROR saving computers: ' + err.message); }
+    }
+
+    // --- Discovery ---
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function renderRemotePrinters() {
+      const list = document.getElementById('remotePrinterList');
+      list.innerHTML = '';
+      if (discovered.length === 0) {
+        list.innerHTML = '<div class="empty">No remote printers discovered yet.</div>';
+        return;
+      }
+      discovered.forEach((pc, pcIndex) => {
+        const card = document.createElement('div');
+        card.className = 'pc-card' + (pc.online ? '' : ' offline');
+        const printers = (pc.printers || []);
+        let body = '';
+        if (!pc.online) {
+          body = `<div class="empty">${pc.error ? 'Error: ' + escapeHtml(pc.error) : 'Computer offline or unreachable.'}</div>`;
+        } else if (printers.length === 0) {
+          body = '<div class="empty">No shared printers found on this computer.</div>';
+        } else {
+          body = printers.map((p, i) => {
+            const id = `rp-${pcIndex}-${i}`;
+            const share = p.shareName || p.name || '';
+            const display = p.displayName || share;
+            return `
+              <div class="printer-item">
+                <input type="checkbox" id="${id}" class="remotePrinterCb" data-pc="${escapeHtml(pc.pcName)}" data-name="${escapeHtml(share)}" data-display="${escapeHtml(display)}">
+                <label for="${id}" class="name" style="margin:0;font-weight:400;cursor:pointer;">${escapeHtml(display)} <small class="hint">(${escapeHtml(pc.pcName)}\\${escapeHtml(share)})</small></label>
+                <span class="badge ${p.status ? 'ready' : 'offline'}">${escapeHtml(p.status || 'shared')}</span>
+              </div>`;
+          }).join('');
+        }
+        card.innerHTML = `
+          <div class="pc-head">
+            <span>${escapeHtml(pc.pcName)}</span>
+            <span class="addr">${pc.online ? 'online' : 'offline'}</span>
+            <span class="badge ${pc.online ? 'ready' : 'offline'}">${pc.online ? 'online' : 'offline'}</span>
+          </div>
+          <div style="margin-top:8px;">${body}</div>`;
+        list.appendChild(card);
+      });
+    }
+
+    async function discoverRemotePrinters() {
+      if (remoteComputers.length === 0) { log('ERROR: add at least one remote computer first'); return; }
+      log('Discovering remote printers on: ' + remoteComputers.join(', '));
+      try {
+        const res = await fetch(base() + '/remote-printers?computers=' + encodeURIComponent(remoteComputers.join(',')), { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (data.error) { log('ERROR discovering: ' + data.error); return; }
+        discovered = Array.isArray(data.results) ? data.results : [];
+        renderRemotePrinters();
+        const total = discovered.reduce((n, pc) => n + (pc.printers || []).length, 0);
+        log(`Discovered ${total} remote printer(s) across ${discovered.length} computer(s)`);
+      } catch (err) { log('ERROR discovering remote printers: ' + err.message); }
+    }
+
+    function getSelectedRemote() {
+      return Array.from(document.querySelectorAll('.remotePrinterCb:checked')).map(cb => ({
+        pcName: cb.getAttribute('data-pc'),
+        name: cb.getAttribute('data-name'),
+        displayName: cb.getAttribute('data-display')
+      }));
+    }
+
+    function buildRemotePrinters() {
+      const selected = getSelectedRemote();
+      const kind = document.getElementById('printerKind').value;
+      const renderMode = document.getElementById('renderMode').value;
+      const widthDots = parseInt(document.getElementById('widthDots').value || '576', 10);
+      return selected.map(p => {
+        const obj = { pcName: p.pcName, name: p.name, type: kind };
+        if (kind === 'receipt') {
+          obj.render = renderMode;
+          obj.widthDots = widthDots;
+        }
+        return obj;
+      });
+    }
+
+    async function checkSelectedStatus() {
+      const selected = getSelectedRemote();
+      if (selected.length === 0) { log('ERROR: tick at least one remote printer'); return; }
+      const remotePrinters = selected.map(p => ({ pcName: p.pcName, name: p.name }));
+      try {
+        const res = await fetch(base() + '/printer-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remotePrinters })
+        });
+        log('Status: ' + JSON.stringify(await res.json(), null, 2));
+      } catch (err) { log('ERROR checking status: ' + err.message); }
+    }
+
+    function buildPrintBody() {
+      const pdfUrl = document.getElementById('pdfUrl').value;
+      const html = document.getElementById('htmlContent').value;
+      const text = document.getElementById('receiptText').value;
+      const copies = parseInt(document.getElementById('copies').value || '1', 10);
+      const kind = document.getElementById('printerKind').value;
+      const remotePrinters = buildRemotePrinters();
+
+      if (remotePrinters.length === 0) { log('ERROR: tick at least one remote printer'); return null; }
+      if (kind === 'document' && !pdfUrl && !html) {
+        log('ERROR: Document printers require a PDF URL or HTML content');
+        return null;
+      }
+      if (kind === 'receipt' && !text && !html) {
+        log('ERROR: Receipt printers require Receipt Text or HTML content');
+        return null;
+      }
+
+      const body = { remotePrinters, copies };
+      if (kind === 'receipt' && text) body.text = text;
+      else if (pdfUrl) body.pdfUrl = pdfUrl;
+      else if (html) body.html = html;
+      return body;
+    }
+
+    async function sendPrint() {
+      const body = buildPrintBody();
+      if (!body) return;
+      try {
+        const res = await fetch(base() + '/print', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        log('Print result: ' + JSON.stringify(await res.json(), null, 2));
+      } catch (err) { log('ERROR printing: ' + err.message); }
+    }
+
+    // --- WebSocket ---
+    function connectWs() {
+      const url = base().replace('http', 'ws');
+      if (ws) ws.close();
+      setStatus('pending', '🟡 Connecting...');
+      ws = new WebSocket(url);
+      ws.onopen = () => { setStatus('connected', '🟢 Connected via WebSocket'); log('WebSocket connected'); };
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        log('WS received: ' + JSON.stringify(data));
+        if (data.type === 'remotePrinters') {
+          discovered = Array.isArray(data.results) ? data.results : [];
+          renderRemotePrinters();
+        }
+        if (data.type === 'remoteComputers') {
+          remoteComputers = Array.isArray(data.computers) ? data.computers : [];
+          renderComputers();
+        }
+      };
+      ws.onclose = () => { setStatus('disconnected', '🔴 Disconnected'); log('WebSocket disconnected'); ws = null; };
+      ws.onerror = () => { setStatus('disconnected', '🔴 Connection error'); log('WebSocket error'); };
+    }
+
+    function sendPrintWs() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { log('ERROR: WebSocket not connected. Click "Connect" first.'); return; }
+      const body = buildPrintBody();
+      if (!body) return;
+      ws.send(JSON.stringify({ type: 'print', id: ++msgId, ...body }));
+      log('WS sent print request #' + msgId);
+    }
+
+    // Load the saved computer list when the page opens.
+    loadComputers();
+  </script>
+</body>
+</html>

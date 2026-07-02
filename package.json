@@ -44,6 +44,7 @@
       "main.js",
       "print-server.js",
       "network-printers.js",
+      "remote-printers.js",
       "escpos-renderer.js",
       "html-to-escpos.js",
       "trust-manager.js",
@@ -52,6 +53,7 @@
       "test-client.html",
       "test-local.html",
       "test-network.html",
+      "test-remote.html",
       "assets/**/*",
       "node_modules/**/*"
     ],

@@ -4,7 +4,10 @@ const store = new Store({
   name: 'EbizTray-config',
   defaults: {
     trustedOrigins: [],
-    apiKey: 'replace-this-with-a-long-random-key'
+    apiKey: '9Xf3KqT8mN2VzA7LpD4HyJ6RwE1UcB5GsZ8NtQ0MxY',
+    // Names of LAN computers whose shared printers can be used as remote
+    // printers (e.g. ['BAR-PC', 'KITCHEN-PC']).
+    remoteComputers: []
   }
 });
 
@@ -48,7 +51,7 @@ function getTrustedOrigins() {
  * Get the API key.
  */
 function getApiKey() {
-  return store.get('apiKey', 'replace-this-with-a-long-random-key');
+  return store.get('apiKey', '9Xf3KqT8mN2VzA7LpD4HyJ6RwE1UcB5GsZ8NtQ0MxY');
 }
 
 /**
@@ -58,11 +61,31 @@ function setApiKey(key) {
   store.set('apiKey', key);
 }
 
+/**
+ * Get the list of known remote computers (whose shared printers can be used).
+ */
+function getRemoteComputers() {
+  return store.get('remoteComputers', []);
+}
+
+/**
+ * Replace the list of known remote computers.
+ */
+function setRemoteComputers(list) {
+  const clean = Array.from(new Set((Array.isArray(list) ? list : [])
+    .map(c => String(c).trim().replace(/^\\+/, ''))
+    .filter(Boolean)));
+  store.set('remoteComputers', clean);
+  return clean;
+}
+
 module.exports = {
   isTrusted,
   trustOrigin,
   revokeTrust,
   getTrustedOrigins,
   getApiKey,
-  setApiKey
+  setApiKey,
+  getRemoteComputers,
+  setRemoteComputers
 };
