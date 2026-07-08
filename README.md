@@ -82,6 +82,64 @@ Requirements:
 
 Remote targets are addressed as `{ pcName: "PCNAME", name: "ShareName" }` and EbizTray prints to them using the same Windows spooler paths as local printers (`\\PCNAME\ShareName`).
 
+#### Enabling WinRM on the remote PC
+
+Discovery uses `Invoke-Command -ComputerName`, which requires PowerShell remoting. On the remote PC (the one with the shared printer), run PowerShell as Administrator and execute:
+
+```powershell
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+```
+
+This starts the WinRM service and opens the firewall for TCP `5985` (HTTP).
+
+On the EbizTray server, if the PCs are in a workgroup (not a domain), add the remote PC names to `TrustedHosts`:
+
+```powershell
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "BAR-PC,KITCHEN-PC" -Force
+```
+
+Test connectivity from the server:
+
+```powershell
+Test-WSMan BAR-PC
+```
+
+#### Workgroup authentication
+
+If both PCs are in the same domain, the current credentials usually work. In a workgroup you must also set up authentication:
+
+1. **On the server** (the PC running EbizTray), add the remote PC to WinRM `TrustedHosts`:
+   ```powershell
+   Set-Item WSMan:\localhost\Client\TrustedHosts -Value "remote pc name" -Force
+   ```
+2. **On the remote PC**, create a local user with the **same username and password** as the Windows user running EbizTray on the server, and add it to the local **Administrators** group.
+
+   > **If the server is signed in with a Microsoft account**, use a dedicated local account instead. The easiest way is to create a local account (e.g., `ebiztray`) on **both** PCs with the same password, run EbizTray under that account, and add it to the Administrators group on the remote PC.
+
+   On the remote PC, use PowerShell as Administrator:
+   ```powershell
+   $Password = Read-Host -AsSecureString -Prompt "Enter password"
+   New-LocalUser -Name "ebiztray" -Password $Password -FullName "EbizTray" -Description "EbizTray remote printing account"
+   Add-LocalGroupMember -Group "Administrators" -Member "ebiztray"
+   ```
+
+3. Make sure **File & Printer Sharing** is enabled and the printer is **Shared**.
+
+If the server account is not recognised on the remote PC, discovery will fail with the exact errors you are seeing: *WinRM `TrustedHosts` not configured*, *WMI access denied*, and *`net view` access denied*.
+
+#### Using explicit credentials (alternative to matching accounts)
+
+Instead of running EbizTray under a matching account, you can store a username/password for each remote PC. EbizTray will use those credentials when discovering and printing to the remote PC.
+
+- Open the **Remote Printers** test page (`/test-remote.html`) and use the **Remote PC Credentials** section.
+- Or call the API directly:
+  ```powershell
+  POST http://localhost:7654/remote-credentials
+  Body: { "credentials": [{ "pcName": "LenovoL14-29", "username": "ebiztray", "password": "YourPassword" }] }
+  ```
+
+> **Security note:** passwords are stored in plain text in EbizTray's config file. Use this only when you cannot rely on matching accounts or a domain.
+
 ---
 
 ## API
@@ -351,3 +409,72 @@ This produces a Windows installer and portable .exe in `dist/`.
 - **Local RAW print fails:** the printer must be installed on the agent machine with a driver that accepts RAW jobs (standard for Epson TM drivers / "Generic / Text Only").
 - **Network laser prints blank:** install Ghostscript (or set `PRINT_AGENT_GS_PATH`) so PDFs can be converted to PostScript/PCL, or set `language:"pdf"` if the printer has a built-in PDF interpreter.
 - **Remote shared printer not found:** verify the remote PC is online, File & Printer Sharing is enabled, the printer is shared, and the server account has permission to use the share.
+
+
+
+
+
+## In Summary:
+# Do these ---
+1. Create a local user on the remote PC with the same username and password as the Windows user running EbizTray on the server, and add it to the local **Administrators** group. Use the command in point 2 for that.
+2. Run the following PowerShell script on the remote PC and server:
+```powershell
+   $Password = Read-Host -AsSecureString -Prompt "Enter password"
+   New-LocalUser -Name "ebiztray" -Password $Password -FullName "EbizTray" -Description "EbizTray remote printing account"
+   Add-LocalGroupMember -Group "Administrators" -Member "ebiztray"
+   ```
+   --password: password123
+3. Run this on server and remote PC powershell:
+```powershell
+   Enable-PSRemoting -Force -SkipNetworkProfileCheck
+   ```
+4. Run this on server powershell:
+```powershell
+  Set-Item WSMan:\localhost\Client\TrustedHosts -Value "remote machine names" -Force
+  ```
+5. Open your browser and type this:
+- http://localhost:7654/test-remote.html
+
+6. Enter Agent URL
+- http://localhost:7654
+then click on Connect (WebSocket)
+
+7. Under Known Remote Computers:
+- Enter the billing PC name (e.g., LenovoL12) and click Add.
+
+8. Under Remote PC Credentials:
+- Enter the Computer name, username and password of the local user created on the billing PC and click Add then Save.
+
+9. Under Discover Shared Printers:
+- Click Discover Shared Printers.
+- Select the printer you want to use.
+
+## For Virtul Machines ---
+1. Network — the VM must reach the remote PCs so "Bridged mode" must be used.
+--The VM appears as a regular machine on the LAN.
+
+2. The VM must resolve remote PC hostnames (LenovoL14-29, DESKTOP-N9OT9TF). Options:
+   - Add entries to C:\Windows\System32\drivers\etc\hosts on the VM
+   - Ensure all machines are in the same workgroup and NetBIOS broadcast works
+   - Use a local DNS server
+
+3. WinRM TrustedHosts (on remote PCs)
+The remote PCs need to trust the VM's hostname (not the physical server's):
+```powershell
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "VM-HOSTNAME" -Force
+```
+And on the VM itself:
+```powershell
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "remote machine names,DESKTOP-N9OT9TF" -Force
+```
+
+4. Credentials are mandatory:
+Since the VM won't share Windows sessions with the remote PCs, the stored credentials feature you already have is essential. Every remote PC needs credentials saved in EbizTray.
+
+5. Summary
+Feature	Physical machine	VM (bridged)
+Remote discovery	Works	Works
+Receipt printing (Invoke-Command)	Works	Works
+Document printing (UNC)	Works with SMB auth	Works — needs driver on VM
+Credentials required	Only for workgroup	Always
+Bottom line: Set the VM to bridged networking, store credentials for every remote PC, configure TrustedHosts both ways, and it will work identically to a physical install.

@@ -5,8 +5,15 @@
   <title>EbizTray — Remote Printers</title>
   <style>
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 0; color: #333; }
     h2 { color: #1a1a1a; margin-bottom: 4px; }
+    .page-wrapper { display: flex; height: 100vh; }
+    .left-panel { flex: 1; overflow-y: auto; padding: 30px 24px; }
+    .right-panel { width: 380px; min-width: 320px; border-left: 1px solid #e2e8f0; display: flex; flex-direction: column; background: #f8f9fa; }
+    .right-panel h3 { margin: 0; padding: 14px 16px 10px; font-size: 15px; border-bottom: 1px solid #e9ecef; }
+    .right-panel pre { flex: 1; margin: 0; border: none; border-radius: 0; background: transparent; font-size: 12px; padding: 12px 16px; overflow-y: auto; max-height: none; }
+    .right-panel .log-actions { padding: 8px 16px; border-top: 1px solid #e9ecef; text-align: right; }
+    .right-panel .log-actions button { margin: 0; padding: 6px 14px; font-size: 12px; }
     .nav { display: flex; gap: 8px; margin: 12px 0 4px; }
     .nav a { font-size: 13px; text-decoration: none; padding: 6px 12px; border: 1px solid #ccc; border-radius: 6px; color: #0066cc; }
     .nav a.active { background: #0066cc; color: #fff; border-color: #0066cc; }
@@ -28,6 +35,11 @@
     .row > div { flex: 1; }
     .row button { margin-top: 0; flex: 0 0 auto; }
     small.hint { color: #888; font-weight: 400; }
+    .pass-wrapper { position: relative; }
+    .pass-wrapper input { padding-right: 34px; }
+    .pass-toggle { position: absolute; right: 8px; bottom: 8px; background: none; border: none; padding: 0; margin: 0; color: #94a3b8; cursor: pointer; line-height: 0; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; }
+    .pass-toggle:hover { color: #475569; background: none; }
+    .pass-toggle svg { width: 18px; height: 18px; }
 
     .pc-card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
     .pc-card.offline { background: #fff5f5; border-color: #feb2b2; }
@@ -47,9 +59,15 @@
     .tag { display: inline-flex; align-items: center; gap: 6px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 16px; padding: 4px 10px; font-size: 13px; }
     .tag button { margin: 0; padding: 0 2px; background: transparent; color: #64748b; font-size: 16px; line-height: 1; }
     .tag button:hover { color: #dc3545; background: transparent; }
+    @media (max-width: 860px) {
+      .page-wrapper { flex-direction: column; height: auto; }
+      .right-panel { width: 100%; min-width: 0; border-left: none; border-top: 1px solid #e2e8f0; height: 300px; }
+    }
   </style>
 </head>
 <body>
+<div class="page-wrapper">
+<div class="left-panel">
   <h2>🖥️ EbizTray — Remote Printers</h2>
   <div class="nav">
     <a href="/test-local.html">Local Printers</a>
@@ -81,6 +99,29 @@
       <button onclick="saveComputers()" class="btn-secondary">Save List</button>
     </div>
     <div id="computerTags" class="tag-list"></div>
+  </div>
+
+  <div class="section">
+    <h3>Remote PC Credentials</h3>
+    <p style="font-size:13px;color:#666;">Used for workgroup PCs where EbizTray cannot use the current Windows account. Passwords are stored in plain text.</p>
+    <div class="row">
+      <div>
+        <small class="hint">Computer name</small>
+        <input id="credPc" placeholder="LenovoL14-29" />
+      </div>
+      <div>
+        <small class="hint">Username</small>
+        <input id="credUser" placeholder="ebiztray" />
+      </div>
+      <div class="pass-wrapper">
+        <small class="hint">Password</small>
+        <input id="credPass" type="password" placeholder="password" />
+        <button type="button" class="pass-toggle" onclick="toggleCredPass()" title="Show password" id="credPassToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
+      <button onclick="addCredential()">Add</button>
+      <button onclick="saveCredentials()" class="btn-secondary">Save</button>
+    </div>
+    <div id="credentialTags" class="tag-list"></div>
   </div>
 
   <div class="section">
@@ -128,15 +169,19 @@
     </div>
   </div>
 
-  <div class="section">
-    <h3>Log</h3>
-    <pre id="result">Waiting for actions...</pre>
-  </div>
+</div><!-- /left-panel -->
+<div class="right-panel">
+  <h3>Log</h3>
+  <pre id="result">Waiting for actions...</pre>
+  <div class="log-actions"><button onclick="document.getElementById('result').textContent='Log cleared.'" class="btn-secondary">Clear Log</button></div>
+</div><!-- /right-panel -->
+</div><!-- /page-wrapper -->
 
   <script>
     let ws = null;
     let msgId = 0;
     let remoteComputers = [];
+    let remoteCredentials = []; // { pcName, username, password }
     let discovered = []; // { pcName, online, printers: [{ name, shareName, displayName, driver, status }], error }
 
     function log(msg) {
@@ -184,9 +229,13 @@
       } catch (err) { log('ERROR loading computers: ' + err.message); }
     }
 
+    function normalizePcName(name) {
+      return String(name || '').trim().replace(/^[-\\]+/, '');
+    }
+
     function addComputer() {
       const input = document.getElementById('newComputer');
-      const name = input.value.trim().replace(/^\\+/, '');
+      const name = normalizePcName(input.value);
       if (!name) { log('ERROR: enter a computer name'); return; }
       if (remoteComputers.includes(name)) { log('Computer already in list: ' + name); return; }
       remoteComputers.push(name);
@@ -213,6 +262,66 @@
       } catch (err) { log('ERROR saving computers: ' + err.message); }
     }
 
+    // --- Remote PC credentials ---
+    function renderCredentials() {
+      const box = document.getElementById('credentialTags');
+      box.innerHTML = '';
+      if (remoteCredentials.length === 0) {
+        box.innerHTML = '<span class="hint">No credentials saved.</span>';
+        return;
+      }
+      remoteCredentials.forEach((c, i) => {
+        const tag = document.createElement('div');
+        tag.className = 'tag';
+        tag.innerHTML = `<span>${escapeHtml(c.pcName)} \\ ${escapeHtml(c.username)}</span><button onclick="removeCredential(${i})" title="Remove">&times;</button>`;
+        box.appendChild(tag);
+      });
+    }
+
+    async function loadCredentials() {
+      try {
+        const res = await fetch(base() + '/remote-credentials', { headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        remoteCredentials = Array.isArray(data.credentials) ? data.credentials : [];
+        renderCredentials();
+        log('Loaded remote credentials: ' + remoteCredentials.length);
+      } catch (err) { log('ERROR loading credentials: ' + err.message); }
+    }
+
+    async function addCredential() {
+      const pc = normalizePcName(document.getElementById('credPc').value);
+      const username = document.getElementById('credUser').value.trim();
+      const password = document.getElementById('credPass').value;
+      if (!pc || !username || !password) { log('ERROR: enter PC name, username and password'); return; }
+      remoteCredentials = remoteCredentials.filter(c => c.pcName.toLowerCase() !== pc.toLowerCase());
+      remoteCredentials.push({ pcName: pc, username, password });
+      document.getElementById('credPc').value = '';
+      document.getElementById('credUser').value = '';
+      document.getElementById('credPass').value = '';
+      renderCredentials();
+      await saveCredentials();
+    }
+
+    async function removeCredential(i) {
+      remoteCredentials.splice(i, 1);
+      renderCredentials();
+      await saveCredentials();
+    }
+
+    async function saveCredentials() {
+      try {
+        const res = await fetch(base() + '/remote-credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credentials: remoteCredentials })
+        });
+        const data = await res.json();
+        remoteCredentials = Array.isArray(data.credentials) ? data.credentials : [];
+        renderCredentials();
+        log('Saved remote credentials: ' + remoteCredentials.length);
+      } catch (err) { log('ERROR saving credentials: ' + err.message); }
+    }
+
     // --- Discovery ---
     function escapeHtml(s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -233,7 +342,13 @@
         if (!pc.online) {
           body = `<div class="empty">${pc.error ? 'Error: ' + escapeHtml(pc.error) : 'Computer offline or unreachable.'}</div>`;
         } else if (printers.length === 0) {
-          body = '<div class="empty">No shared printers found on this computer.</div>';
+          if (pc.errors && pc.errors.length) {
+            body = '<div class="empty">No shared printers found. Discovery errors:</div>' +
+              '<pre style="font-size:12px;background:transparent;border:0;padding:4px 0;color:#b91c1c;">' +
+              pc.errors.map(e => escapeHtml(e)).join('<br>') + '</pre>';
+          } else {
+            body = '<div class="empty">No shared printers found on this computer.</div>';
+          }
         } else {
           body = printers.map((p, i) => {
             const id = `rp-${pcIndex}-${i}`;
@@ -252,6 +367,7 @@
             <span>${escapeHtml(pc.pcName)}</span>
             <span class="addr">${pc.online ? 'online' : 'offline'}</span>
             <span class="badge ${pc.online ? 'ready' : 'offline'}">${pc.online ? 'online' : 'offline'}</span>
+            <span class="badge ${pc.hasCredentials ? 'document' : 'offline'}">${pc.hasCredentials ? 'credentials set' : 'no credentials'}</span>
           </div>
           <div style="margin-top:8px;">${body}</div>`;
         list.appendChild(card);
@@ -269,6 +385,11 @@
         renderRemotePrinters();
         const total = discovered.reduce((n, pc) => n + (pc.printers || []).length, 0);
         log(`Discovered ${total} remote printer(s) across ${discovered.length} computer(s)`);
+        discovered.forEach(pc => {
+          log(`${pc.pcName}: credentials ${pc.hasCredentials ? 'found' : 'not found'}`);
+          if (pc.error) log(`${pc.pcName}: ${pc.error}`);
+          (pc.errors || []).forEach(e => log(`${pc.pcName}: ${e}`));
+        });
       } catch (err) { log('ERROR discovering remote printers: ' + err.message); }
     }
 
@@ -286,7 +407,7 @@
       const renderMode = document.getElementById('renderMode').value;
       const widthDots = parseInt(document.getElementById('widthDots').value || '576', 10);
       return selected.map(p => {
-        const obj = { pcName: p.pcName, name: p.name, type: kind };
+        const obj = { pcName: p.pcName, name: p.name, displayName: p.displayName, type: kind };
         if (kind === 'receipt') {
           obj.render = renderMode;
           obj.widthDots = widthDots;
@@ -378,8 +499,23 @@
       log('WS sent print request #' + msgId);
     }
 
-    // Load the saved computer list when the page opens.
+    function toggleCredPass() {
+      const inp = document.getElementById('credPass');
+      const btn = document.getElementById('credPassToggle');
+      if (inp.type === 'password') {
+        inp.type = 'text';
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+        btn.title = 'Hide password';
+      } else {
+        inp.type = 'password';
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+        btn.title = 'Show password';
+      }
+    }
+
+    // Load the saved computer list and credentials when the page opens.
     loadComputers();
+    loadCredentials();
   </script>
 </body>
 </html>

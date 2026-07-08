@@ -7,7 +7,9 @@ const store = new Store({
     apiKey: '9Xf3KqT8mN2VzA7LpD4HyJ6RwE1UcB5GsZ8NtQ0MxY',
     // Names of LAN computers whose shared printers can be used as remote
     // printers (e.g. ['BAR-PC', 'KITCHEN-PC']).
-    remoteComputers: []
+    remoteComputers: [],
+    // Credentials for remote PCs in a workgroup (stored in plain text).
+    remoteCredentials: []
   }
 });
 
@@ -79,6 +81,45 @@ function setRemoteComputers(list) {
   return clean;
 }
 
+/**
+ * Get all stored remote PC credentials.
+ */
+function getRemoteCredentials() {
+  return store.get('remoteCredentials', []);
+}
+
+/**
+ * Get the stored credential for a specific PC (case-insensitive).
+ */
+function getRemoteCredential(pcName) {
+  const name = String(pcName || '').trim().replace(/^\\+/, '').toLowerCase();
+  if (!name) return null;
+  return getRemoteCredentials().find(c =>
+    String(c.pcName || '').trim().replace(/^\\+/, '').toLowerCase() === name
+  ) || null;
+}
+
+/**
+ * Replace the full list of remote PC credentials.
+ * Duplicates are removed (last entry wins). Passwords are stored in plain text.
+ */
+function setRemoteCredentials(list) {
+  const clean = [];
+  const seen = new Set();
+  for (const item of (Array.isArray(list) ? list : [])) {
+    const pcName = String(item.pcName || '').trim().replace(/^\\+/, '');
+    const username = String(item.username || '').trim();
+    const password = String(item.password || '');
+    if (!pcName || !username || !password) continue;
+    const key = pcName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push({ pcName, username, password });
+  }
+  store.set('remoteCredentials', clean);
+  return clean;
+}
+
 module.exports = {
   isTrusted,
   trustOrigin,
@@ -87,5 +128,8 @@ module.exports = {
   getApiKey,
   setApiKey,
   getRemoteComputers,
-  setRemoteComputers
+  setRemoteComputers,
+  getRemoteCredentials,
+  getRemoteCredential,
+  setRemoteCredentials
 };

@@ -16,6 +16,16 @@ const { htmlToEscpos } = require('./html-to-escpos');
 
 const PORT = process.env.PRINT_AGENT_PORT || 7654;
 
+// Build a lookup object { pcName: { pcName, username, password } } from the
+// persisted remote-credentials list.
+function getRemoteCredentialsMap() {
+  const map = {};
+  for (const c of trustManager.getRemoteCredentials()) {
+    if (c.pcName) map[c.pcName] = c;
+  }
+  return map;
+}
+
 let approvalCallback = null; // Set by main.js to show dialog
 
 function setApprovalCallback(cb) {
@@ -133,6 +143,49 @@ function printRawToLocalPrinter(bytes, printerName, copies = 1) {
     execFile('lp', ['-d', printerName, '-o', 'raw', '-n', String(numCopies), rawFile], (err) => {
       fs.unlink(rawFile, () => {});
       if (err) return reject(err);
+      resolve();
+    });
+  });
+}
+
+// Windows: print raw ESC/POS bytes to a printer that is installed on a
+// remote PC by running the RAW printing script on that PC via Invoke-Command.
+// This avoids the server's SMB/OpenPrinter credential issues because the
+// printer is opened locally on the remote PC.
+function printRawToRemotePrinter(bytes, pcName, printerName, credentials, copies = 1) {
+  const numCopies = Math.max(1, copies || 1);
+  const host = String(pcName || '').replace(/^\\+/, '');
+  if (!host) return Promise.reject(new Error('Remote PC name is required'));
+  if (!printerName) return Promise.reject(new Error('Remote printer name is required'));
+  if (!credentials || !credentials.username || !credentials.password) {
+    return Promise.reject(new Error('Credentials are required for remote raw printing'));
+  }
+
+  const ps1File = path.join(os.tmpdir(), `EbizTray-remote-raw-${crypto.randomUUID()}.ps1`);
+  fs.writeFileSync(ps1File, REMOTE_RAW_PRINT_PS1, 'utf8');
+
+  const cleanup = () => {
+    fs.unlink(ps1File, () => {});
+  };
+
+  const user = remotePrintersModule.normalizeRemoteUsername(credentials.username, host);
+  const safeUser = String(user || '').replace(/'/g, "''");
+  const safePass = String(credentials.password || '').replace(/'/g, "''");
+  const safeHost = host.replace(/'/g, "''");
+  const safePrinter = String(printerName || '').replace(/'/g, "''");
+  const safePath = ps1File.replace(/'/g, "''");
+  const b64 = bytes.toString('base64');
+
+  const cmd =
+    remotePrintersModule.psCredentialString(user, credentials.password) +
+    `Invoke-Command -ComputerName '${safeHost}' -Credential $cred -FilePath '${safePath}' -ArgumentList '${b64}', '${safePrinter}', ${numCopies}`;
+
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd
+    ], { windowsHide: true }, (err, stdout, stderr) => {
+      cleanup();
+      if (err) return reject(new Error((stderr || err.message || '').trim() || 'Remote raw print failed'));
       resolve();
     });
   });
@@ -266,6 +319,53 @@ public class EbizRawPrinter {
 Add-Type -TypeDefinition $code
 $bytes = [System.IO.File]::ReadAllBytes($FilePath)
 [EbizRawPrinter]::Send($PrinterName, $bytes)
+`;
+
+// PowerShell script that is sent to a remote computer to print raw receipt
+// bytes locally. The bytes are base64-encoded because Invoke-Command only
+// accepts serialisable argument values.
+const REMOTE_RAW_PRINT_PS1 = `param([Parameter(Mandatory=$true)][string]$Base64Bytes, [Parameter(Mandatory=$true)][string]$PrinterName, [int]$Copies = 1)
+$ErrorActionPreference = 'Stop'
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+public class EbizRawPrinter {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DOCINFO {
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype;
+  }
+  [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool OpenPrinter(string src, out IntPtr hPrinter, IntPtr pd);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFO di);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError = true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] buf, int count, out int written);
+  public static void Send(string printerName, byte[] bytes) {
+    IntPtr h;
+    if (!OpenPrinter(printerName, out h, IntPtr.Zero)) throw new Exception("OpenPrinter failed for '" + printerName + "': " + Marshal.GetLastWin32Error());
+    try {
+      DOCINFO di = new DOCINFO();
+      di.pDocName = "EbizTray Receipt";
+      di.pDatatype = "RAW";
+      if (!StartDocPrinter(h, 1, ref di)) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
+      try {
+        if (!StartPagePrinter(h)) throw new Exception("StartPagePrinter failed: " + Marshal.GetLastWin32Error());
+        int written;
+        if (!WritePrinter(h, bytes, bytes.Length, out written)) throw new Exception("WritePrinter failed: " + Marshal.GetLastWin32Error());
+        EndPagePrinter(h);
+      } finally { EndDocPrinter(h); }
+    } finally { ClosePrinter(h); }
+  }
+}
+"@
+Add-Type -TypeDefinition $code
+$bytes = [Convert]::FromBase64String($Base64Bytes)
+for ($i = 0; $i -lt $Copies; $i++) {
+  [EbizRawPrinter]::Send($PrinterName, $bytes)
+}
 `;
 
 // ---------------------------------------------------------------------------
@@ -493,8 +593,26 @@ async function doPrintJob({ printerName, printers, networkPrinters, remotePrinte
       }
     }
 
+    // Authenticate to a remote PC before printing if credentials are stored.
+    const runWithRemoteAuth = async (m, fn) => {
+      const cred = trustManager.getRemoteCredential(m.target.pcName);
+      if (!cred) return fn();
+      let authErr;
+      try {
+        authErr = await remotePrintersModule.authenticateRemotePc(m.target.pcName, cred.username, cred.password);
+      } catch (e) {
+        authErr = e;
+      }
+      if (authErr) throw new Error('Remote authentication failed: ' + authErr.message);
+      try {
+        return await fn();
+      } finally {
+        await remotePrintersModule.clearRemoteSession(m.target.pcName).catch(() => {});
+      }
+    };
+
     // The actual print action for a single target, by role.
-    const runFor = (m) => {
+    const runFor = async (m) => {
       switch (m.role) {
         case 'localDoc':
           return printFile(pdfFile, m.target.name, numCopies);
@@ -507,12 +625,21 @@ async function doPrintJob({ printerName, printers, networkPrinters, remotePrinte
           return buildReceiptBytes(m.target)
             .then(bytes => networkPrintersModule.printRawBytes(bytes, m.target.ip, m.target.port || 9100, numCopies));
         case 'remoteDoc':
-          return printFile(pdfFile, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies);
+          return runWithRemoteAuth(m, () => printFile(pdfFile, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies));
         case 'remoteReceipt':
-          return buildReceiptBytes(m.target)
-            .then(bytes => printRawToLocalPrinter(bytes, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies));
+          return buildReceiptBytes(m.target).then(bytes => {
+            const cred = trustManager.getRemoteCredential(m.target.pcName);
+            // If we know the local printer name on the remote PC and have
+            // credentials, run the raw print on the remote PC itself to avoid
+            // OpenPrinter/SMB credential issues from the server.
+            const remotePrinterName = m.target.displayName || m.target.name;
+            if (cred && remotePrinterName) {
+              return printRawToRemotePrinter(bytes, m.target.pcName, remotePrinterName, cred, numCopies);
+            }
+            return runWithRemoteAuth(m, () => printRawToLocalPrinter(bytes, remotePrintersModule.uncName(m.target.pcName, m.target.name), numCopies));
+          });
         default:
-          return Promise.reject(new Error('Unknown target role: ' + m.role));
+          throw new Error('Unknown target role: ' + m.role);
       }
     };
 
@@ -674,7 +801,8 @@ app.get('/remote-printers', requireTrust, async (req, res) => {
     computers = trustManager.getRemoteComputers();
   }
   try {
-    const results = await remotePrintersModule.listRemotePrintersForComputers(computers);
+    const credentialsMap = getRemoteCredentialsMap();
+    const results = await remotePrintersModule.listRemotePrintersForComputers(computers, credentialsMap);
     res.json({ computers, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -690,6 +818,17 @@ app.post('/remote-computers', requireTrust, async (req, res) => {
   const { computers } = req.body || {};
   const cleaned = trustManager.setRemoteComputers(computers);
   res.json({ computers: cleaned });
+});
+
+// Read/write the persisted list of remote PC credentials (used in workgroups).
+app.get('/remote-credentials', requireTrust, async (req, res) => {
+  res.json({ credentials: trustManager.getRemoteCredentials() });
+});
+
+app.post('/remote-credentials', requireTrust, async (req, res) => {
+  const { credentials } = req.body || {};
+  const cleaned = trustManager.setRemoteCredentials(credentials);
+  res.json({ credentials: cleaned });
 });
 
 // Report the online/reachability status of the requested printers WITHOUT
@@ -753,7 +892,8 @@ wss.on('connection', async (ws, req) => {
 
         case 'discoverRemotePrinters': {
           const computers = msg.computers || trustManager.getRemoteComputers();
-          const results = await remotePrintersModule.listRemotePrintersForComputers(computers);
+          const credentialsMap = getRemoteCredentialsMap();
+          const results = await remotePrintersModule.listRemotePrintersForComputers(computers, credentialsMap);
           ws.send(JSON.stringify({ type: 'remotePrinters', id: msg.id, computers, results }));
           break;
         }
@@ -766,6 +906,17 @@ wss.on('connection', async (ws, req) => {
         case 'setRemoteComputers': {
           const cleaned = trustManager.setRemoteComputers(msg.computers);
           ws.send(JSON.stringify({ type: 'remoteComputers', id: msg.id, computers: cleaned }));
+          break;
+        }
+
+        case 'listRemoteCredentials': {
+          ws.send(JSON.stringify({ type: 'remoteCredentials', id: msg.id, credentials: trustManager.getRemoteCredentials() }));
+          break;
+        }
+
+        case 'setRemoteCredentials': {
+          const cleaned = trustManager.setRemoteCredentials(msg.credentials);
+          ws.send(JSON.stringify({ type: 'remoteCredentials', id: msg.id, credentials: cleaned }));
           break;
         }
 
